@@ -346,6 +346,12 @@ def load_seen():
 
 
 def save_seen(seen):
+    parent_dir = os.path.dirname(SEEN_FILE)
+    if parent_dir and not os.path.isdir(parent_dir):
+        try:
+            os.makedirs(parent_dir, exist_ok=True)
+        except OSError as e:
+            print(f"[warn] could not create directory for SEEN_FILE_PATH ({parent_dir}): {e}")
     with open(SEEN_FILE, "w") as f:
         json.dump(seen, f)
 

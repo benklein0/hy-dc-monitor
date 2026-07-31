@@ -1,0 +1,535 @@
+"""
+HY Datacenter News Monitor
+---------------------------
+Runs on a schedule (hourly via Railway cron). For each tracked bond /
+issuing entity, pulls:
+
+  1. Corporate-level news  (parent company name)
+  2. Local/site-level news (the specific city/county where the data
+     center collateral sits) — this is where permitting, zoning,
+     tax abatement, substation/power, and water-use stories tend to
+     break first, well before they hit national coverage.
+
+Both are pulled from Google News RSS (free, no API key), deduped against
+a persisted state file, and emailed as a single digest via Gmail SMTP.
+"""
+
+import hashlib
+import json
+import os
+import smtplib
+import time
+import urllib.parse
+from collections import defaultdict
+from datetime import datetime, timezone
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+
+import feedparser
+
+# ---------------------------------------------------------------------------
+# Bond / issuing-entity map.
+#   name      = full issuing entity name (from the offering)
+#   parent    = sponsor / parent company (used for corporate-news search)
+#   locations = site location(s) tied to the collateral (used for
+#               local/county news search). Leave empty list if the
+#               collateral is too diffuse to search geographically
+#               (e.g. CoreWeave's 41 sites).
+# ---------------------------------------------------------------------------
+BONDS = {
+    "APLD": {
+        "name": "Applied Digital - APLD ComputeCo LLC",
+        "parent": "Applied Digital",
+        "locations": ["Ellendale, North Dakota"],
+    },
+    "PFORGE": {
+        "name": "Applied Digital - APLD ComputeCo 2 LLC",
+        "parent": "Applied Digital",
+        "locations": ["Harwood, North Dakota"],
+    },
+    "ELNFOR": {
+        "name": "Applied Digital - APLD ComputeCo 3 LLC",
+        "parent": "Applied Digital",
+        "locations": ["Ellendale, North Dakota"],
+    },
+    "CIFR": {
+        "name": "Cipher Digital - Cipher Compute LLC",
+        "parent": "Cipher Mining",
+        "locations": ["Colorado City, Texas"],
+    },
+    "BLKPRL": {
+        "name": "Cipher Digital - Black Pearl ComputeCo LLC",
+        "parent": "Cipher Mining",
+        "locations": ["Wink, Texas"],
+    },
+    "STNGRY": {
+        "name": "Cipher Digital - Stingray ComputCo LLC",
+        "parent": "Cipher Mining",
+        "locations": ["Andrews, Texas"],
+    },
+    "CORZ": {
+        "name": "Core Scientific Inc (Core Scientific Finance LLC)",
+        "parent": "Core Scientific",
+        "locations": [
+            "Denton, Texas",
+            "Dalton, Georgia",
+            "Muskogee, Oklahoma",
+            "Marble, North Carolina",
+            "Austin, Texas",
+        ],
+    },
+    "CRWV": {
+        "name": "CoreWeave Inc",
+        "parent": "CoreWeave",
+        "locations": [],  # 41 datacenters — too diffuse to search geographically
+    },
+    "EDGCOM": {
+        "name": "Edged Compute LLC",
+        "parent": "Edged Compute",
+        "locations": ["Atlanta, Georgia", "Chicago, Illinois"],
+    },
+    "GALAXY": {
+        "name": "Galaxy Helios Data Centers II LLC",
+        "parent": "Galaxy Digital",
+        "locations": ["Dickens County, Texas"],
+    },
+    "MERIDI": {
+        "name": "Next Frontier/Fluidstack JV - Meridian Arc Holdco LLC",
+        "parent": "Next Frontier / Fluidstack JV",
+        "locations": ["New Lebanon, Sullivan County, Indiana"],
+    },
+    "ELKGVP": {
+        "name": "Prime Data Centers, LLC - Elk Grove Village Property LLC",
+        "parent": "Prime Data Centers",
+        "locations": ["Elk Grove Village, Illinois"],
+    },
+    "SECMOS": {
+        "name": "SB Energy - SE Cosmos, LLC",
+        "parent": "SB Energy",
+        "locations": ["Austin, Texas"],
+    },
+    "TRACTC": {
+        "name": "Tract Capital/Fleet Data Centers - SV RNO Property Owner 1, LLC",
+        "parent": "Tract / Fleet Data Centers",
+        "locations": ["Storey County, Nevada"],
+    },
+    "TRACTD": {
+        "name": "Tract Capital/Fleet Data Centers - PR RNO Property Owner 1, LLC",
+        "parent": "Tract / Fleet Data Centers",
+        "locations": ["Storey County, Nevada"],
+    },
+    "WULF": {
+        "name": "TeraWulf - WULF Compute LLC",
+        "parent": "TeraWulf",
+        "locations": ["Barker, New York"],
+    },
+    "FLASHC": {
+        "name": "TeraWulf/Fluidstack JV - Flash Compute LLC",
+        "parent": "TeraWulf",
+        "locations": ["Abernathy, Texas"],
+    },
+    "YNDRDC": {
+        "name": "Yondr Group - Yondr JK 1, LLC",
+        "parent": "Yondr Group",
+        "locations": ["Loudoun County, Virginia"],
+    },
+}
+
+# Some parent labels above are my own descriptive shorthand, not names that
+# actually appear in news articles (e.g. nobody writes "Tract / Fleet Data
+# Centers" verbatim). For those, override the corporate search query with
+# terms that actually match real coverage.
+CORPORATE_SEARCH_OVERRIDES = {
+    "Tract / Fleet Data Centers": '("Tract Capital" OR (Tract AND (data center OR Nevada OR Storey)))',
+    "Next Frontier / Fluidstack JV": '("Next Frontier Data Centers" OR Fluidstack)',
+}
+
+# Site-specific proper nouns (utility companies, project/campus nicknames,
+# county names) researched per site — these are searched directly since a
+# lot of trade-press and local coverage uses the utility or project name
+# rather than the town name (e.g. TeraWulf's Barker, NY site is publicly
+# known as "Lake Mariner", in the Town of Somerset).
+SITE_KEYWORDS = {
+    "Ellendale, North Dakota": ["Montana-Dakota Utilities", "MDU", "Dickey County", "Polaris Forge"],
+    "Harwood, North Dakota": ["Cass County Electric Cooperative", "Polaris Forge 2", "Minnkota Power"],
+    "Colorado City, Texas": ["Barber Lake", "Mitchell County"],
+    "Wink, Texas": ["Black Pearl", "Winkler County", "Kermit Texas"],
+    "Andrews, Texas": ["Stingray", "Andrews County", "Lyntegar Electric"],
+    "Denton, Texas": ["Denton Municipal Electric"],
+    "Dalton, Georgia": ["Dalton Utilities", "Whitfield County"],
+    "Muskogee, Oklahoma": ["Port of Muskogee", "Muskogee City-County Port Authority", "OG&E"],
+    "Marble, North Carolina": ["Cherokee County North Carolina", "Duke Energy", "Blue Ridge Mountain EMC"],
+    "Austin, Texas": ["Austin Energy"],
+    "Atlanta, Georgia": ["Georgia Power"],
+    "Chicago, Illinois": ["ComEd", "Commonwealth Edison"],
+    "Dickens County, Texas": [],
+    "New Lebanon, Sullivan County, Indiana": ["Hoosier Energy", "Duke Energy Indiana", "Frontier Development Holdings"],
+    "Elk Grove Village, Illinois": ["ComEd", "Commonwealth Edison", "Cook County"],
+    "Storey County, Nevada": ["Tahoe Reno Industrial Center", "TRIC", "NV Energy"],
+    "Barker, New York": ["Lake Mariner", "Somerset New York", "Niagara County", "National Grid"],
+    "Abernathy, Texas": ["Hale County Texas", "Lubbock County"],
+    "Loudoun County, Virginia": ["Dominion Energy", "Data Center Alley"],
+}
+
+# Additional curated feeds beyond Nevada Independent, mostly nonprofit
+# statehouse/regional outlets (States Newsroom network + similar) that
+# cover energy/utility and data-center-development stories closely.
+# NOTE: these feed URLs are researched but not all individually verified —
+# if one 404s, drop it or find the correct feed path for that outlet.
+# Curated direct RSS feeds for outlets known to cover a specific site closely
+# — a higher-reliability supplement to Google News search, since smaller
+# regional/state outlets can be slow to surface or rank low in search results.
+# match_terms: entries are kept only if title/summary contain at least one
+# (case-insensitive substring match) — feeds are site-wide, not topic-filtered.
+CURATED_FEEDS = {
+    "Storey County, Nevada": [
+        {
+            "feed_url": "https://thenevadaindependent.com/feed/",
+            "match_terms": [
+                "data center", "datacenter", "tract", "storey county",
+                "tric", "nv energy", "tahoe reno",
+            ],
+        },
+    ],
+}
+
+CURATED_FEEDS.update({
+    "Ellendale, North Dakota": [
+        {"feed_url": "https://northdakotamonitor.com/feed/",
+         "match_terms": ["data center", "applied digital", "ellendale", "mdu", "montana-dakota"]},
+    ],
+    "Harwood, North Dakota": [
+        {"feed_url": "https://northdakotamonitor.com/feed/",
+         "match_terms": ["data center", "applied digital", "harwood", "cass county electric", "polaris forge"]},
+    ],
+    "Dalton, Georgia": [
+        {"feed_url": "https://georgiarecorder.com/feed/",
+         "match_terms": ["data center", "dalton", "core scientific", "dalton utilities", "whitfield county"]},
+    ],
+    "Atlanta, Georgia": [
+        {"feed_url": "https://georgiarecorder.com/feed/",
+         "match_terms": ["data center", "georgia power", "edged compute"]},
+    ],
+    "Muskogee, Oklahoma": [
+        {"feed_url": "https://oklahomavoice.com/feed/",
+         "match_terms": ["data center", "muskogee", "core scientific", "port of muskogee"]},
+    ],
+    "Marble, North Carolina": [
+        {"feed_url": "https://ncnewsline.com/feed/",
+         "match_terms": ["data center", "marble", "cherokee county", "core scientific"]},
+    ],
+    "New Lebanon, Sullivan County, Indiana": [
+        {"feed_url": "https://indianacapitalchronicle.com/feed/",
+         "match_terms": ["data center", "sullivan county", "fluidstack", "next frontier"]},
+    ],
+    "Loudoun County, Virginia": [
+        {"feed_url": "https://virginiamercury.com/feed/",
+         "match_terms": ["data center", "loudoun", "yondr", "dominion energy"]},
+    ],
+    "Elk Grove Village, Illinois": [
+        {"feed_url": "https://capitolnewsillinois.com/feed/",
+         "match_terms": ["data center", "elk grove village", "prime data centers", "comed"]},
+    ],
+    "Chicago, Illinois": [
+        {"feed_url": "https://capitolnewsillinois.com/feed/",
+         "match_terms": ["data center", "chicago", "edged compute", "comed"]},
+    ],
+})
+
+SEEN_FILE = os.environ.get("SEEN_FILE_PATH", "seen_articles.json")
+
+# Local-news queries are narrowed with these keywords so a location like
+# "Austin, Texas" doesn't pull in unrelated city news. Covers permitting/
+# zoning, tax/fiscal, utility & power infrastructure, and litigation/
+# regulatory disputes — the categories that tend to move HY credit views
+# on site-specific project finance debt.
+BASE_LOCAL_TERMS = [
+    "data center", "datacenter", "rezoning", "zoning", "tax abatement",
+    "substation", "power purchase", "moratorium", "county commissioners",
+    "planning commission", "water use", "permit", "lawsuit", "sues",
+    "sued", "litigation", "dispute", "utility", "electricity",
+    "power plant", "grid", "interconnection", "public utilities commission",
+    "regulator", "regulators",
+]
+
+# Tenant/hyperscaler + grid interconnect (ISO/RTO) terms per location,
+# pulled from the lease/tenant detail table. These co-occur with the
+# location name in the query (unlike SITE_KEYWORDS below, which are
+# distinctive enough to search standalone). Tenant names alone (e.g.
+# "Oracle", "Google") are too generic to search without a location anchor.
+TENANT_KEYWORDS = {
+    "Ellendale, North Dakota": ["CoreWeave", "SPP interconnect"],
+    "Harwood, North Dakota": ["Oracle", "SPP interconnect"],
+    "Colorado City, Texas": ["Fluidstack", "ERCOT"],
+    "Wink, Texas": ["AWS", "Amazon Web Services", "ERCOT"],
+    "Andrews, Texas": ["AWS", "Amazon Web Services", "ERCOT"],
+    "Denton, Texas": ["CoreWeave"],
+    "Dalton, Georgia": ["CoreWeave"],
+    "Muskogee, Oklahoma": ["CoreWeave"],
+    "Marble, North Carolina": ["CoreWeave"],
+    "Austin, Texas": ["CoreWeave", "SoftBank", "OpenAI", "ERCOT"],
+    "Atlanta, Georgia": ["Alibaba"],
+    "Chicago, Illinois": ["CoreWeave", "PJM"],
+    "Dickens County, Texas": ["CoreWeave", "ERCOT"],
+    "New Lebanon, Sullivan County, Indiana": ["Fluidstack", "Google", "MISO interconnect"],
+    "Elk Grove Village, Illinois": ["CoreWeave", "PJM interconnect"],
+    "Storey County, Nevada": ["Nvidia"],
+    "Barker, New York": ["Core42", "G42", "Fluidstack", "NYISO"],
+    "Abernathy, Texas": ["Fluidstack", "Google", "ERCOT"],
+    "Loudoun County, Virginia": ["Oracle", "PJM Dominion"],
+}
+
+
+def _keyword_clause(terms):
+    return "(" + " OR ".join(f'"{t}"' if " " in t else t for t in terms) + ")"
+
+LOOKBACK_WINDOW = "1d"          # Google News RSS "when:" operator
+MAX_SEEN_AGE_DAYS = 14
+REQUEST_DELAY_SECONDS = 1.5
+
+import re
+
+GMAIL_ADDRESS = "".join(os.environ["GMAIL_ADDRESS"].split())
+GMAIL_APP_PASSWORD = "".join(os.environ["GMAIL_APP_PASSWORD"].split())
+
+
+def _check_ascii(name, value):
+    try:
+        value.encode("ascii")
+    except UnicodeEncodeError:
+        raise SystemExit(
+            f"\n[config error] {name} contains a non-ASCII character (often caused by "
+            f"curly/smart quotes sneaking in when an export command is pasted from Notes, "
+            f"Word, etc. instead of typed directly). Re-export it using plain straight "
+            f'quotes, e.g.:\n  export {name}="your_value_here"\n'
+        )
+
+
+_check_ascii("GMAIL_ADDRESS", GMAIL_ADDRESS)
+_check_ascii("GMAIL_APP_PASSWORD", GMAIL_APP_PASSWORD)
+
+# Comma-separated list of recipients, e.g. "a@example.com,b@example.com"
+ALERT_EMAIL_TO = [
+    addr.strip()
+    for addr in os.environ.get("ALERT_EMAIL_TO", GMAIL_ADDRESS).split(",")
+    if addr.strip()
+]
+
+
+# ---------------------------------------------------------------------------
+# Derived lookup tables: unique parents / locations -> tickers referencing them
+# ---------------------------------------------------------------------------
+def build_query_groups():
+    parents = defaultdict(list)   # parent name -> [tickers]
+    locations = defaultdict(list)  # location string -> [tickers]
+    for ticker, info in BONDS.items():
+        parents[info["parent"]].append(ticker)
+        for loc in info["locations"]:
+            locations[loc].append(ticker)
+    return parents, locations
+
+
+PARENT_GROUPS, LOCATION_GROUPS = build_query_groups()
+
+
+# ---------------------------------------------------------------------------
+# State handling
+# ---------------------------------------------------------------------------
+def load_seen():
+    if os.path.exists(SEEN_FILE):
+        try:
+            with open(SEEN_FILE, "r") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return {}
+    return {}
+
+
+def save_seen(seen):
+    with open(SEEN_FILE, "w") as f:
+        json.dump(seen, f)
+
+
+def trim_seen(seen):
+    cutoff = time.time() - MAX_SEEN_AGE_DAYS * 86400
+    return {k: v for k, v in seen.items() if v.get("first_seen", 0) > cutoff}
+
+
+def article_key(entry):
+    basis = entry.get("link") or entry.get("title", "")
+    return hashlib.sha256(basis.encode("utf-8")).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# News fetching
+# ---------------------------------------------------------------------------
+def fetch_news(query):
+    encoded = urllib.parse.quote(f"{query} when:{LOOKBACK_WINDOW}")
+    url = f"https://news.google.com/rss/search?q={encoded}&hl=en-US&gl=US&ceid=US:en"
+    feed = feedparser.parse(url)
+    return feed.entries
+
+
+def fetch_corporate_news(parent_name):
+    query = CORPORATE_SEARCH_OVERRIDES.get(parent_name, f'"{parent_name}"')
+    return fetch_news(query)
+
+
+def fetch_site_specific_news(location):
+    """Search researched proper nouns (utility names, project nicknames,
+    county names) directly — doesn't require the town name to co-occur,
+    since a lot of coverage refers to the project/utility by name only."""
+    terms = SITE_KEYWORDS.get(location, [])
+    if not terms:
+        return []
+    return fetch_news(_keyword_clause(terms))
+
+
+def fetch_curated_entries(location):
+    """Poll any curated direct RSS feeds registered for this location and
+    return only entries matching that feed's keyword list."""
+    results = []
+    for source in CURATED_FEEDS.get(location, []):
+        try:
+            feed = feedparser.parse(source["feed_url"])
+        except Exception as e:
+            print(f"[warn] curated feed fetch failed for {source['feed_url']}: {e}")
+            continue
+        terms = [t.lower() for t in source["match_terms"]]
+        for entry in feed.entries:
+            haystack = (entry.get("title", "") + " " + entry.get("summary", "")).lower()
+            if any(term in haystack for term in terms):
+                results.append(entry)
+    return results
+
+
+def fetch_local_news(location):
+    terms = BASE_LOCAL_TERMS + TENANT_KEYWORDS.get(location, [])
+    query = f'"{location}" {_keyword_clause(terms)}'
+    return fetch_news(query)
+
+
+# ---------------------------------------------------------------------------
+# Email
+# ---------------------------------------------------------------------------
+def _render_items_html(items):
+    lis = []
+    for item in items:
+        title = item.get("title", "Untitled")
+        link = item.get("link", "")
+        published = item.get("published", "")
+        source = item.get("source", {}).get("title", "") if hasattr(item, "get") else ""
+        lis.append(
+            f'<li><a href="{link}">{title}</a><br><small>{source} — {published}</small></li>'
+        )
+    return "<ul>" + "".join(lis) + "</ul>"
+
+
+def _render_items_text(items):
+    return "\n".join(f"  - {item.get('title', 'Untitled')} ({item.get('link', '')})" for item in items)
+
+
+def build_email(new_corporate, new_local):
+    total = sum(len(v) for v in new_corporate.values()) + sum(len(v) for v in new_local.values())
+    subject = f"HY Datacenter News Alert — {total} new item{'s' if total != 1 else ''}"
+
+    html_parts = [f"<p>New news for tracked HY datacenter bonds (last {LOOKBACK_WINDOW}):</p>"]
+    text_parts = ["New news for tracked HY datacenter bonds:"]
+
+    if new_corporate:
+        html_parts.append("<h2>Corporate News</h2>")
+        text_parts.append("\n=== CORPORATE NEWS ===")
+        for parent, items in new_corporate.items():
+            tickers = ", ".join(PARENT_GROUPS[parent])
+            html_parts.append(f"<h3>{parent} ({tickers})</h3>")
+            html_parts.append(_render_items_html(items))
+            text_parts.append(f"\n{parent} ({tickers})")
+            text_parts.append(_render_items_text(items))
+
+    if new_local:
+        html_parts.append("<h2>Local / Site News</h2>")
+        text_parts.append("\n=== LOCAL / SITE NEWS ===")
+        for location, items in new_local.items():
+            tickers = ", ".join(LOCATION_GROUPS[location])
+            html_parts.append(f"<h3>{location} ({tickers})</h3>")
+            html_parts.append(_render_items_html(items))
+            text_parts.append(f"\n{location} ({tickers})")
+            text_parts.append(_render_items_text(items))
+
+    html = f"<html><body>{''.join(html_parts)}</body></html>"
+    text = "\n".join(text_parts)
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"] = GMAIL_ADDRESS
+    msg["To"] = ", ".join(ALERT_EMAIL_TO)
+    msg.attach(MIMEText(text, "plain"))
+    msg.attach(MIMEText(html, "html"))
+    return msg
+
+
+def send_email(msg):
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+        server.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
+        server.sendmail(GMAIL_ADDRESS, ALERT_EMAIL_TO, msg.as_string())
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+def _dedupe_fresh(entries, seen, tag):
+    fresh = []
+    for entry in entries:
+        key = article_key(entry)
+        if key not in seen:
+            seen[key] = {"first_seen": time.time(), "tag": tag}
+            fresh.append(entry)
+    return fresh
+
+
+def main():
+    seen = load_seen()
+    new_corporate = {}
+    new_local = {}
+
+    for parent in PARENT_GROUPS:
+        try:
+            entries = fetch_corporate_news(parent)
+        except Exception as e:
+            print(f"[warn] corporate fetch failed for {parent}: {e}")
+            entries = []
+        fresh = _dedupe_fresh(entries, seen, f"corp:{parent}")
+        if fresh:
+            new_corporate[parent] = fresh
+        time.sleep(REQUEST_DELAY_SECONDS)
+
+    for location in LOCATION_GROUPS:
+        try:
+            entries = fetch_local_news(location)
+        except Exception as e:
+            print(f"[warn] local fetch failed for {location}: {e}")
+            entries = []
+        try:
+            entries += fetch_site_specific_news(location)
+        except Exception as e:
+            print(f"[warn] site-specific fetch failed for {location}: {e}")
+        entries += fetch_curated_entries(location)
+        fresh = _dedupe_fresh(entries, seen, f"local:{location}")
+        if fresh:
+            new_local[location] = fresh
+        time.sleep(REQUEST_DELAY_SECONDS)
+
+    seen = trim_seen(seen)
+    save_seen(seen)
+
+    if new_corporate or new_local:
+        msg = build_email(new_corporate, new_local)
+        send_email(msg)
+        total = sum(len(v) for v in new_corporate.values()) + sum(len(v) for v in new_local.values())
+        print(f"[{datetime.now(timezone.utc).isoformat()}] Sent alert with {total} new item(s).")
+    else:
+        print(f"[{datetime.now(timezone.utc).isoformat()}] No new items this run.")
+
+
+if __name__ == "__main__":
+    main()

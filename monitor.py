@@ -14,18 +14,22 @@ Both are pulled from Google News RSS (free, no API key), deduped against
 a persisted state file, and emailed as a single digest via Gmail SMTP.
 """
 
+import calendar
 import hashlib
 import json
 import os
-import smtplib
+import socket
 import time
 import urllib.parse
 from collections import defaultdict
 from datetime import datetime, timezone
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
 
 import feedparser
+import requests
+
+# Prevent a single slow/unresponsive host from hanging the entire run —
+# feedparser doesn't set a network timeout by default.
+socket.setdefaulttimeout(15)
 
 # ---------------------------------------------------------------------------
 # Bond / issuing-entity map.
@@ -287,10 +291,8 @@ LOOKBACK_WINDOW = "1d"          # Google News RSS "when:" operator
 MAX_SEEN_AGE_DAYS = 14
 REQUEST_DELAY_SECONDS = 1.5
 
-import re
-
-GMAIL_ADDRESS = "".join(os.environ["GMAIL_ADDRESS"].split())
-GMAIL_APP_PASSWORD = "".join(os.environ["GMAIL_APP_PASSWORD"].split())
+RESEND_API_KEY = "".join(os.environ["RESEND_API_KEY"].split())
+EMAIL_FROM = "".join(os.environ["EMAIL_FROM"].split())
 
 
 def _check_ascii(name, value):
@@ -305,13 +307,13 @@ def _check_ascii(name, value):
         )
 
 
-_check_ascii("GMAIL_ADDRESS", GMAIL_ADDRESS)
-_check_ascii("GMAIL_APP_PASSWORD", GMAIL_APP_PASSWORD)
+_check_ascii("RESEND_API_KEY", RESEND_API_KEY)
+_check_ascii("EMAIL_FROM", EMAIL_FROM)
 
 # Comma-separated list of recipients, e.g. "a@example.com,b@example.com"
 ALERT_EMAIL_TO = [
     addr.strip()
-    for addr in os.environ.get("ALERT_EMAIL_TO", GMAIL_ADDRESS).split(",")
+    for addr in os.environ.get("ALERT_EMAIL_TO", EMAIL_FROM).split(",")
     if addr.strip()
 ]
 
@@ -366,6 +368,22 @@ def article_key(entry):
     return hashlib.sha256(basis.encode("utf-8")).hexdigest()
 
 
+# Hard cutoff: nothing older than this ever makes it into an alert, no
+# matter the source. Google News's "when:1d" is a best-effort filter, not
+# a guarantee, and curated/site-specific RSS feeds have no date filtering
+# at all — so this is the actual enforcement point.
+MAX_ARTICLE_AGE_DAYS = 14
+
+
+def _is_recent_enough(entry, max_age_days=MAX_ARTICLE_AGE_DAYS):
+    struct = entry.get("published_parsed") or entry.get("updated_parsed")
+    if not struct:
+        return True  # no date info available — don't drop, can't confirm either way
+    published_ts = calendar.timegm(struct)
+    age_days = (time.time() - published_ts) / 86400
+    return age_days <= max_age_days
+
+
 # ---------------------------------------------------------------------------
 # News fetching
 # ---------------------------------------------------------------------------
@@ -383,17 +401,30 @@ def fetch_corporate_news(parent_name):
 
 def fetch_site_specific_news(location):
     """Search researched proper nouns (utility names, project nicknames,
-    county names) directly — doesn't require the town name to co-occur,
-    since a lot of coverage refers to the project/utility by name only."""
+    county names). These co-occur with a data-center/energy anchor term
+    (not the town name itself) rather than being searched fully standalone
+    — several of these terms (utility companies, county names) are common
+    enough on their own to pull in unrelated local news (e.g. "Whitfield
+    County" alone matches routine high-school sports coverage)."""
     terms = SITE_KEYWORDS.get(location, [])
     if not terms:
         return []
-    return fetch_news(_keyword_clause(terms))
+    anchor = _keyword_clause(BASE_LOCAL_TERMS + ["compute", "hyperscale"])
+    query = f"{_keyword_clause(terms)} {anchor}"
+    return fetch_news(query)
+
+
+# Terms that alone just mean "this article is about the general topic
+# area" — curated feed matches require one of these PLUS at least one
+# more specific identifying term, so a bare county/city name isn't
+# sufficient on its own (avoids false positives like local sports
+# coverage that happens to mention the county name).
+_CURATED_ANCHOR_TERMS = ["data center", "datacenter", "compute", "hyperscale"]
 
 
 def fetch_curated_entries(location):
     """Poll any curated direct RSS feeds registered for this location and
-    return only entries matching that feed's keyword list."""
+    return only entries matching an anchor term plus a specific identifier."""
     results = []
     for source in CURATED_FEEDS.get(location, []):
         try:
@@ -401,10 +432,14 @@ def fetch_curated_entries(location):
         except Exception as e:
             print(f"[warn] curated feed fetch failed for {source['feed_url']}: {e}")
             continue
-        terms = [t.lower() for t in source["match_terms"]]
+        specific_terms = [
+            t.lower() for t in source["match_terms"] if t.lower() not in _CURATED_ANCHOR_TERMS
+        ]
         for entry in feed.entries:
             haystack = (entry.get("title", "") + " " + entry.get("summary", "")).lower()
-            if any(term in haystack for term in terms):
+            has_anchor = any(a in haystack for a in _CURATED_ANCHOR_TERMS)
+            has_specific = any(t in haystack for t in specific_terms) if specific_terms else True
+            if has_anchor and has_specific:
                 results.append(entry)
     return results
 
@@ -465,19 +500,27 @@ def build_email(new_corporate, new_local):
     html = f"<html><body>{''.join(html_parts)}</body></html>"
     text = "\n".join(text_parts)
 
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject
-    msg["From"] = GMAIL_ADDRESS
-    msg["To"] = ", ".join(ALERT_EMAIL_TO)
-    msg.attach(MIMEText(text, "plain"))
-    msg.attach(MIMEText(html, "html"))
-    return msg
+    return {"subject": subject, "html": html, "text": text}
 
 
 def send_email(msg):
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-        server.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
-        server.sendmail(GMAIL_ADDRESS, ALERT_EMAIL_TO, msg.as_string())
+    resp = requests.post(
+        "https://api.resend.com/emails",
+        headers={
+            "Authorization": f"Bearer {RESEND_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "from": EMAIL_FROM,
+            "to": ALERT_EMAIL_TO,
+            "subject": msg["subject"],
+            "html": msg["html"],
+            "text": msg["text"],
+        },
+        timeout=30,
+    )
+    if resp.status_code >= 400:
+        raise RuntimeError(f"Resend API error {resp.status_code}: {resp.text}")
 
 
 # ---------------------------------------------------------------------------
@@ -486,6 +529,8 @@ def send_email(msg):
 def _dedupe_fresh(entries, seen, tag):
     fresh = []
     for entry in entries:
+        if not _is_recent_enough(entry):
+            continue
         key = article_key(entry)
         if key not in seen:
             seen[key] = {"first_seen": time.time(), "tag": tag}
@@ -494,11 +539,15 @@ def _dedupe_fresh(entries, seen, tag):
 
 
 def main():
+    print(f"[{datetime.now(timezone.utc).isoformat()}] Starting run: "
+          f"{len(PARENT_GROUPS)} corporate + {len(LOCATION_GROUPS)} local queries "
+          f"(plus site-specific + curated feeds per location)")
     seen = load_seen()
     new_corporate = {}
     new_local = {}
 
-    for parent in PARENT_GROUPS:
+    for i, parent in enumerate(PARENT_GROUPS, 1):
+        print(f"  [{i}/{len(PARENT_GROUPS)}] corporate: {parent}")
         try:
             entries = fetch_corporate_news(parent)
         except Exception as e:
@@ -509,7 +558,8 @@ def main():
             new_corporate[parent] = fresh
         time.sleep(REQUEST_DELAY_SECONDS)
 
-    for location in LOCATION_GROUPS:
+    for i, location in enumerate(LOCATION_GROUPS, 1):
+        print(f"  [{i}/{len(LOCATION_GROUPS)}] local: {location}")
         try:
             entries = fetch_local_news(location)
         except Exception as e:

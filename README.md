@@ -90,11 +90,29 @@ Colorado City TX, Wink TX, Andrews TX, Abernathy TX) don't yet have a
 curated feed — Texas Tribune covers data center/ERCOT issues well
 statewide and would be a good one to add if useful.
 
-## 1. Gmail App Password setup
+## Why Resend instead of Gmail SMTP
 
-1. Enable 2-Step Verification: https://myaccount.google.com/security
-2. Generate an App Password: https://myaccount.google.com/apppasswords
-3. Save it — you'll paste it into Railway as `GMAIL_APP_PASSWORD`.
+Railway blocks outbound SMTP (ports 465/587/2525) entirely on Free, Trial,
+and Hobby plans — it's only available on Pro and above. Gmail SMTP will
+connect fine when you test locally (your Mac isn't behind that block) but
+will fail with `OSError: [Errno 101] Network is unreachable` once deployed
+on Railway. Rather than pay for Pro just to unblock SMTP, this uses
+[Resend](https://resend.com)'s HTTPS API instead — HTTPS traffic isn't
+blocked, and their free tier (3,000 emails/month) is far more than an
+hourly alert job needs.
+
+## 1. Resend setup
+
+1. Sign up at https://resend.com (free).
+2. **Add and verify a sending domain** at https://resend.com/domains —
+   you'll add a few DNS records (TXT/CNAME) at your domain registrar.
+   If you don't want to verify a domain yet, Resend also gives you a
+   test sending address (`onboarding@resend.dev`) that works immediately,
+   but can only send to the email address on your Resend account (not
+   arbitrary recipients like your Mizuho address) — fine for an initial
+   smoke test, not for the real recipient list.
+3. Create an API key at https://resend.com/api-keys — copy it, you'll
+   paste it into Railway as `RESEND_API_KEY`.
 
 ## 2. Push this to a GitHub repo
 
@@ -110,8 +128,8 @@ folder directly).
 
 Service → **Variables**:
 
-- `GMAIL_ADDRESS`
-- `GMAIL_APP_PASSWORD`
+- `RESEND_API_KEY`
+- `EMAIL_FROM` (e.g. `alerts@yourdomain.com`, must be on the verified domain)
 - `ALERT_EMAIL_TO`
 - `SEEN_FILE_PATH` = `/data/seen_articles.json`
 
@@ -148,9 +166,9 @@ Hourly:
 
 ```bash
 pip install -r requirements.txt
-export GMAIL_ADDRESS=youraddress@gmail.com
-export GMAIL_APP_PASSWORD="xxxx xxxx xxxx xxxx"
-export ALERT_EMAIL_TO=you@example.com
+export RESEND_API_KEY="re_xxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+export EMAIL_FROM="alerts@yourdomain.com"
+export ALERT_EMAIL_TO="you@example.com"
 python monitor.py
 ```
 

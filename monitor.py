@@ -18,11 +18,13 @@ import calendar
 import hashlib
 import json
 import os
+import re
 import socket
 import time
 import urllib.parse
 from collections import defaultdict
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 
 import feedparser
 import requests
@@ -526,15 +528,45 @@ def send_email(msg):
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
-def _dedupe_fresh(entries, seen, tag):
+TITLE_SIMILARITY_THRESHOLD = 0.85  # 0-1; higher = stricter match required
+
+
+def _normalize_title(title):
+    t = title.strip()
+    # Google News (and some outlets) append " - Source Name" to titles;
+    # strip that so the same story from two sources compares cleanly.
+    if " - " in t:
+        t = t.rsplit(" - ", 1)[0]
+    t = re.sub(r"\W+", " ", t.lower()).strip()
+    return t
+
+
+def _is_similar_to_any(norm_title, seen_titles, threshold=TITLE_SIMILARITY_THRESHOLD):
+    if not norm_title:
+        return False
+    for existing in seen_titles:
+        if SequenceMatcher(None, norm_title, existing).ratio() >= threshold:
+            return True
+    return False
+
+
+def _dedupe_fresh(entries, seen, seen_titles, tag):
     fresh = []
     for entry in entries:
         if not _is_recent_enough(entry):
             continue
         key = article_key(entry)
-        if key not in seen:
-            seen[key] = {"first_seen": time.time(), "tag": tag}
-            fresh.append(entry)
+        if key in seen:
+            continue
+        title = entry.get("title", "")
+        norm = _normalize_title(title)
+        is_title_dup = _is_similar_to_any(norm, seen_titles)
+        seen[key] = {"first_seen": time.time(), "tag": tag, "title": title}
+        if is_title_dup:
+            continue  # same story as something already alerted on/seen this run
+        if norm:
+            seen_titles.add(norm)
+        fresh.append(entry)
     return fresh
 
 
@@ -543,6 +575,11 @@ def main():
           f"{len(PARENT_GROUPS)} corporate + {len(LOCATION_GROUPS)} local queries "
           f"(plus site-specific + curated feeds per location)")
     seen = load_seen()
+    seen_titles = {
+        _normalize_title(v["title"])
+        for v in seen.values()
+        if v.get("title") and _normalize_title(v["title"])
+    }
     new_corporate = {}
     new_local = {}
 
@@ -553,7 +590,7 @@ def main():
         except Exception as e:
             print(f"[warn] corporate fetch failed for {parent}: {e}")
             entries = []
-        fresh = _dedupe_fresh(entries, seen, f"corp:{parent}")
+        fresh = _dedupe_fresh(entries, seen, seen_titles, f"corp:{parent}")
         if fresh:
             new_corporate[parent] = fresh
         time.sleep(REQUEST_DELAY_SECONDS)
@@ -570,7 +607,7 @@ def main():
         except Exception as e:
             print(f"[warn] site-specific fetch failed for {location}: {e}")
         entries += fetch_curated_entries(location)
-        fresh = _dedupe_fresh(entries, seen, f"local:{location}")
+        fresh = _dedupe_fresh(entries, seen, seen_titles, f"local:{location}")
         if fresh:
             new_local[location] = fresh
         time.sleep(REQUEST_DELAY_SECONDS)

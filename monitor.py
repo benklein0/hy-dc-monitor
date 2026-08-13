@@ -139,6 +139,14 @@ BONDS = {
         "parent": "Yondr Group",
         "locations": ["Loudoun County, Virginia"],
     },
+    # No bond ticker known yet — "ZENARC" is a placeholder key I made up
+    # so this fits the existing dict structure. Swap it for the real
+    # ticker once it's assigned; nothing else needs to change.
+    "ZENARC": {
+        "name": "Zenith Arc LLC",
+        "parent": "Zenith Arc",
+        "locations": ["Okmulgee, Oklahoma"],
+    },
 }
 
 # Some parent labels above are my own descriptive shorthand, not names that
@@ -175,6 +183,10 @@ SITE_KEYWORDS = {
     "Barker, New York": ["Lake Mariner", "Somerset New York", "Niagara County", "National Grid"],
     "Abernathy, Texas": ["Hale County Texas", "Lubbock County"],
     "Loudoun County, Virginia": ["Dominion Energy", "Data Center Alley"],
+    "Okmulgee, Oklahoma": [
+        "Redd Ridge Consulting", "Three Rivers Manufacturing", "Hodges Warehouse",
+        "Okmulgee Area Development Corporation", "East Central Oklahoma Electric",
+    ],
 }
 
 # Additional curated feeds beyond Nevada Independent, mostly nonprofit
@@ -219,6 +231,10 @@ CURATED_FEEDS.update({
     "Muskogee, Oklahoma": [
         {"feed_url": "https://oklahomavoice.com/feed/",
          "match_terms": ["data center", "muskogee", "core scientific", "port of muskogee"]},
+    ],
+    "Okmulgee, Oklahoma": [
+        {"feed_url": "https://oklahomavoice.com/feed/",
+         "match_terms": ["data center", "okmulgee", "zenith arc", "redd ridge"]},
     ],
     "Marble, North Carolina": [
         {"feed_url": "https://ncnewsline.com/feed/",
@@ -283,6 +299,7 @@ TENANT_KEYWORDS = {
     "Barker, New York": ["Core42", "G42", "Fluidstack", "NYISO"],
     "Abernathy, Texas": ["Fluidstack", "Google", "ERCOT"],
     "Loudoun County, Virginia": ["Oracle", "PJM Dominion"],
+    "Okmulgee, Oklahoma": ["Fluidstack", "Public Service Company of Oklahoma", "SPP"],
 }
 
 

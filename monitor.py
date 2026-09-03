@@ -424,6 +424,22 @@ def build_query_groups():
 
 PARENT_GROUPS, LOCATION_GROUPS = build_query_groups()
 
+# Real public equity tickers, for the subset of parents that actually trade
+# publicly. NOTE: most of the "tickers" in BONDS are internal bond/SPV
+# shorthand (STNGRY, PFORGE, GALAXY, etc.), not tradable stock symbols —
+# searching those literally would find nothing. This map is only for
+# genuinely public parents, used as an extra raw-recall search term.
+# Galaxy Digital's real ticker is GLXY, not "GALAXY" (our internal bond
+# code for that entry).
+PUBLIC_TICKER_OVERRIDE = {
+    "Applied Digital": "APLD",
+    "Cipher Mining": "CIFR",
+    "Core Scientific": "CORZ",
+    "CoreWeave": "CRWV",
+    "Galaxy Digital": "GLXY",
+    "TeraWulf": "WULF",
+}
+
 
 # ---------------------------------------------------------------------------
 # State handling
@@ -581,6 +597,31 @@ def fetch_local_news(location):
     return fetch_news(query)
 
 
+def fetch_raw_ticker_news(parent_name):
+    """Raw, ungated search on the actual public equity ticker (not our
+    internal bond code) for parents that trade publicly. No anchor-term
+    requirement — this exists specifically to catch real coverage gaps
+    where an article doesn't happen to use any of our keyword-search
+    vocabulary. Feeds the same downstream dedup + Claude assessment as
+    every other layer, so a genuine miss here can still land in the main
+    alert, not just the QC review digest."""
+    ticker = PUBLIC_TICKER_OVERRIDE.get(parent_name)
+    if not ticker:
+        return []
+    return fetch_news(f'"{ticker}"')
+
+
+def fetch_raw_location_news(location):
+    """Raw, ungated search on just the bare location name — no anchor-term
+    or keyword requirement. Broader and noisier than fetch_local_news, by
+    design: this is the recall backstop for the case where a genuinely
+    relevant site-level article doesn't use any of our anchor vocabulary
+    (zoning, utility, lawsuit, etc.). The extra noise this produces is
+    handled downstream by the Claude on_topic/market_moving check, same
+    as every other layer."""
+    return fetch_news(f'"{location}"')
+
+
 # ---------------------------------------------------------------------------
 # Email
 # ---------------------------------------------------------------------------
@@ -722,7 +763,6 @@ def _dedupe_fresh(entries, seen, seen_titles, tag):
 # not just a coincidental keyword overlap, and (b) plausibly market-moving /
 # credit-relevant for that bond. Only items that pass both checks make it
 # into the email, each with a short bond-specific impact note attached.
-ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 
 _RELEVANCE_SYSTEM_PROMPT = """You are a high-yield credit analyst screening news for a datacenter bond monitoring system.
 
@@ -732,7 +772,7 @@ This feed generates two outputs from the same assessment: a STRICT digest (only 
 
 1. "on_topic": Is this article actually about this specific issuer, its tenant, or this specific site/location — not just a coincidental keyword match, not an unrelated company, not generic content (legal explainers, routine local news like sports/weather with no substantive tie)? A sector- or industry-trend piece that discusses a tenant/company as one example within a broader narrative about an entire category of companies (e.g. "neoclouds are getting bigger and riskier," "the AI datacenter boom faces headwinds") is NOT on_topic even if it names the tenant — it's commentary about a trend, not about this specific issuer's situation, unless it reports a fact specific to this issuer distinguishable from the general narrative. This is the only bar for "is this worth a human's attention to review at all."
 2. "market_moving": Is it plausibly market-moving or credit-relevant for this bond? On weighting LOCAL vs. CORPORATE: LOCAL/SITE-level news (permitting/zoning votes or reversals, county/planning commission decisions, utility/interconnection disputes or delays, tax abatement votes, litigation tied to the specific site, water/power use disputes, organized local opposition affecting timeline) is very often the single most important, earliest credit signal for this kind of debt — apply a MODERATE bar here: genuine, confirmed site-specific developments count even if modest in scale. For CORPORATE-level news, apply a HIGHER bar: require a clear, specific, stated mechanism tying it to this bond's actual economics (tenant ability-to-pay, issuer financing, ratings, litigation, use-of-proceeds affecting this site). Valuation milestones, funding-round announcements, or "milestone reached" PR that state a headline number WITHOUT a specific stated mechanism connecting it to this bond's cash flows, collateral, or counterparty risk should be market_moving=false — a valuation figure alone doesn't tell you if lease terms or ability-to-pay changed.
-3. "primary_incremental": Is this primary, incremental reporting — an actual new fact or development — rather than derivative commentary or a rehash? Mark false for: stock technical-analysis/price-action commentary ("why X stock moved today", chart/momentum pieces, "stocks to watch" listicles), opinion/recap/"explainer" pieces restating previously reported facts, aggregator/wire rehashes with no new information beyond a prior article, sector-wide opinion/analysis pieces (op-eds, "state of the industry" pieces) that use a tenant as an illustrative example rather than reporting a new fact about that specific issuer, and sell-side analyst rating/price-target actions ("X maintains Buy rating, raises price target to $Y", coverage initiations, rating changes) — these reflect one analyst's valuation opinion, not a new fact about the issuer's operations, financing, or credit profile, regardless of which outlet reports it.
+3. "primary_incremental": Is this primary, incremental reporting — an actual new fact or development — rather than derivative commentary or a rehash? Mark false for: stock technical-analysis or macro-driven equity price commentary ("why X stock moved today", chart/momentum pieces, "stocks to watch" listicles, or pieces attributing stock price moves — for one name or several named together — to macro conditions like interest rates, Treasury yields, or broad risk sentiment, without reporting a company-specific new fact) — these are equity-market commentary reacting to price action or macro conditions, not primary news about a specific issuer's operations, financing terms, or credit profile, even when they name the specific tickers and cite real numbers; opinion/recap/"explainer" pieces restating previously reported facts; aggregator/wire rehashes with no new information beyond a prior article; sector-wide opinion/analysis pieces (op-eds, "state of the industry" pieces) that use a tenant as an illustrative example rather than reporting a new fact about that specific issuer; and sell-side analyst rating/price-target actions ("X maintains Buy rating, raises price target to $Y", coverage initiations, rating changes) — these reflect one analyst's valuation opinion, not a new fact about the issuer's operations, financing, or credit profile, regardless of which outlet reports it.
 
 Be reasonably generous on "on_topic" (that's the low bar for the review digest) but strict and precise on "market_moving" and "primary_incremental" (those gate the main alert). When genuinely uncertain on "on_topic," lean inclusive; when uncertain on the other two, lean toward false.
 
@@ -740,6 +780,19 @@ For each article, always include a brief one-sentence "analysis": if on_topic an
 
 Respond with ONLY a JSON array, no other text, no markdown code fences, one object per article in the same order given:
 [{"index": 0, "on_topic": true, "market_moving": true, "primary_incremental": true, "analysis": "..."}, {"index": 1, "on_topic": true, "market_moving": false, "primary_incremental": true, "analysis": "..."}]"""
+
+
+ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
+
+# Haiku 4.5 pricing as of Sep 2026: $1/M input tokens, $5/M output tokens.
+# https://www.anthropic.com/claude/haiku — check for updates if this drifts.
+_HAIKU_INPUT_COST_PER_MTOK = 1.00
+_HAIKU_OUTPUT_COST_PER_MTOK = 5.00
+
+# Accumulates actual token usage across all Claude calls in a single run
+# (reset at the top of main()), so we can log a real cost estimate at the
+# end rather than guessing from character counts.
+_usage_totals = {"input_tokens": 0, "output_tokens": 0, "calls": 0}
 
 
 def _call_claude(system_prompt, user_prompt, max_tokens=2000):
@@ -760,6 +813,10 @@ def _call_claude(system_prompt, user_prompt, max_tokens=2000):
     )
     resp.raise_for_status()
     data = resp.json()
+    usage = data.get("usage", {})
+    _usage_totals["input_tokens"] += usage.get("input_tokens", 0)
+    _usage_totals["output_tokens"] += usage.get("output_tokens", 0)
+    _usage_totals["calls"] += 1
     return "".join(
         block.get("text", "") for block in data.get("content", []) if block.get("type") == "text"
     )
@@ -870,6 +927,10 @@ def assess_relevance(group_label, tickers, entries, context_type):
 
 
 def main():
+    _usage_totals["input_tokens"] = 0
+    _usage_totals["output_tokens"] = 0
+    _usage_totals["calls"] = 0
+
     print(f"[{datetime.now(timezone.utc).isoformat()}] Starting run: "
           f"{len(PARENT_GROUPS)} corporate + {len(LOCATION_GROUPS)} local queries "
           f"(plus site-specific + curated feeds per location)")
@@ -889,6 +950,10 @@ def main():
         except Exception as e:
             print(f"[warn] corporate fetch failed for {parent}: {e}")
             entries = []
+        try:
+            entries += fetch_raw_ticker_news(parent)
+        except Exception as e:
+            print(f"[warn] raw ticker fetch failed for {parent}: {e}")
         fresh = _dedupe_fresh(entries, seen, seen_titles, f"corp:{parent}")
         if fresh:
             new_corporate[parent] = fresh
@@ -905,6 +970,10 @@ def main():
             entries += fetch_site_specific_news(location)
         except Exception as e:
             print(f"[warn] site-specific fetch failed for {location}: {e}")
+        try:
+            entries += fetch_raw_location_news(location)
+        except Exception as e:
+            print(f"[warn] raw location fetch failed for {location}: {e}")
         entries += fetch_curated_entries(location)
         fresh = _dedupe_fresh(entries, seen, seen_titles, f"local:{location}")
         if fresh:
@@ -974,6 +1043,15 @@ def main():
         print(f"[{datetime.now(timezone.utc).isoformat()}] Sent review digest with {total} excluded-but-on-topic item(s) to {REVIEW_EMAIL_TO}.")
     else:
         print(f"[{datetime.now(timezone.utc).isoformat()}] No excluded-but-on-topic items for the review digest this run.")
+
+    input_tok = _usage_totals["input_tokens"]
+    output_tok = _usage_totals["output_tokens"]
+    calls = _usage_totals["calls"]
+    est_cost = (input_tok / 1_000_000 * _HAIKU_INPUT_COST_PER_MTOK) + (output_tok / 1_000_000 * _HAIKU_OUTPUT_COST_PER_MTOK)
+    print(f"[{datetime.now(timezone.utc).isoformat()}] Claude usage this run: {calls} call(s), "
+          f"{input_tok:,} input tok + {output_tok:,} output tok "
+          f"≈ ${est_cost:.5f} (at ${_HAIKU_INPUT_COST_PER_MTOK}/M in, ${_HAIKU_OUTPUT_COST_PER_MTOK}/M out — "
+          f"check current pricing at anthropic.com/claude/haiku if this seems stale).")
 
 
 if __name__ == "__main__":

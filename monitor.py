@@ -312,6 +312,8 @@ REQUEST_DELAY_SECONDS = 1.5
 
 RESEND_API_KEY = "".join(os.environ["RESEND_API_KEY"].split())
 EMAIL_FROM = "".join(os.environ["EMAIL_FROM"].split())
+ANTHROPIC_API_KEY = "".join(os.environ["ANTHROPIC_API_KEY"].split())
+ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001").strip()
 
 
 def _check_ascii(name, value):
@@ -328,6 +330,7 @@ def _check_ascii(name, value):
 
 _check_ascii("RESEND_API_KEY", RESEND_API_KEY)
 _check_ascii("EMAIL_FROM", EMAIL_FROM)
+_check_ascii("ANTHROPIC_API_KEY", ANTHROPIC_API_KEY)
 
 # Comma-separated list of recipients, e.g. "a@example.com,b@example.com"
 ALERT_EMAIL_TO = [
@@ -474,27 +477,34 @@ def fetch_local_news(location):
 # ---------------------------------------------------------------------------
 def _render_items_html(items):
     lis = []
-    for item in items:
+    for item, analysis in items:
         title = item.get("title", "Untitled")
         link = item.get("link", "")
         published = item.get("published", "")
         source = item.get("source", {}).get("title", "") if hasattr(item, "get") else ""
+        analysis_html = f'<br><em>Impact: {analysis}</em>' if analysis else ""
         lis.append(
-            f'<li><a href="{link}">{title}</a><br><small>{source} — {published}</small></li>'
+            f'<li><a href="{link}">{title}</a><br><small>{source} — {published}</small>'
+            f'{analysis_html}</li>'
         )
     return "<ul>" + "".join(lis) + "</ul>"
 
 
 def _render_items_text(items):
-    return "\n".join(f"  - {item.get('title', 'Untitled')} ({item.get('link', '')})" for item in items)
+    lines = []
+    for item, analysis in items:
+        lines.append(f"  - {item.get('title', 'Untitled')} ({item.get('link', '')})")
+        if analysis:
+            lines.append(f"    Impact: {analysis}")
+    return "\n".join(lines)
 
 
 def build_email(new_corporate, new_local):
     total = sum(len(v) for v in new_corporate.values()) + sum(len(v) for v in new_local.values())
     subject = f"HY Datacenter News Alert — {total} new item{'s' if total != 1 else ''}"
 
-    html_parts = [f"<p>New news for tracked HY datacenter bonds (last {LOOKBACK_WINDOW}):</p>"]
-    text_parts = ["New news for tracked HY datacenter bonds:"]
+    html_parts = [f"<p>New, market-relevant news for tracked HY datacenter bonds (last {LOOKBACK_WINDOW}):</p>"]
+    text_parts = ["New, market-relevant news for tracked HY datacenter bonds:"]
 
     if new_corporate:
         html_parts.append("<h2>Corporate News</h2>")
@@ -587,6 +597,109 @@ def _dedupe_fresh(entries, seen, seen_titles, tag):
     return fresh
 
 
+# ---------------------------------------------------------------------------
+# Relevance + impact analysis (Claude)
+# ---------------------------------------------------------------------------
+# The keyword search above is intentionally broad — it's a recall tool, not
+# a precision tool. A "lawsuit" keyword match can just as easily hit a
+# generic legal-blog explainer about crypto disclosure law in Ontario as it
+# can hit an actual lawsuit against one of our tenants. This step adds real
+# judgment on top: for each batch of keyword-matched candidates, ask Claude
+# whether the article is (a) actually about this specific issuer/site/tenant,
+# not just a coincidental keyword overlap, and (b) plausibly market-moving /
+# credit-relevant for that bond. Only items that pass both checks make it
+# into the email, each with a short bond-specific impact note attached.
+ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
+
+_RELEVANCE_SYSTEM_PROMPT = """You are a high-yield credit analyst screening news for a datacenter bond monitoring system.
+
+You will be given a bond/issuer group (ticker(s), issuer name, site location) and a list of candidate news articles that matched a keyword search. The keyword search is deliberately broad and produces a lot of noise — coincidental keyword overlaps, generic legal-explainer content, unrelated companies, routine local news with no real connection to this issuer or site.
+
+For EACH article, decide:
+1. Is it actually about this specific issuer, its tenant, or this specific site/location — not just a coincidental keyword match?
+2. Is it plausibly market-moving or credit-relevant for this bond? Examples of relevant news: financing/refinancing, litigation involving this issuer or its tenant, permitting/zoning votes or reversals, utility/interconnection disputes or delays, tenant lease changes or defaults, ratings actions, project delays/cancellations, material opposition organizing that could affect timeline, regulatory action specific to this project.
+
+Mark NOT relevant: generic explainer/legal-blog content not about this issuer, unrelated companies/entities that happen to share a keyword, routine local news (sports, weather, general community events) with no substantive connection to this bond, and anything you're not reasonably confident is actually about this specific issuer/site.
+
+When in doubt between "interesting but tangential" and "not relevant," mark it not relevant — this feed should be selective, not comprehensive.
+
+Respond with ONLY a JSON array, no other text, no markdown code fences, one object per article in the same order given:
+[{"index": 0, "relevant": true, "analysis": "1-2 sentence bond-specific impact"}, {"index": 1, "relevant": false, "analysis": ""}]"""
+
+
+def _call_claude(system_prompt, user_prompt, max_tokens=2000):
+    resp = requests.post(
+        ANTHROPIC_API_URL,
+        headers={
+            "x-api-key": ANTHROPIC_API_KEY,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        },
+        json={
+            "model": ANTHROPIC_MODEL,
+            "max_tokens": max_tokens,
+            "system": system_prompt,
+            "messages": [{"role": "user", "content": user_prompt}],
+        },
+        timeout=60,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    return "".join(
+        block.get("text", "") for block in data.get("content", []) if block.get("type") == "text"
+    )
+
+
+def _parse_json_array(raw):
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = raw.strip("`")
+        if raw.lower().startswith("json"):
+            raw = raw[4:]
+    return json.loads(raw.strip())
+
+
+def assess_relevance(group_label, tickers, entries):
+    """Filters a batch of keyword-matched candidates down to genuinely
+    relevant, bond-specific, market-moving items, each paired with a short
+    impact analysis. Returns a list of (entry, analysis) tuples.
+
+    Fails open (keeps all candidates, unanalyzed) if the API call or
+    response parsing fails, rather than silently dropping everything —
+    a noisy run is recoverable, a silently empty one isn't."""
+    if not entries:
+        return []
+
+    article_lines = []
+    for i, entry in enumerate(entries):
+        title = entry.get("title", "")
+        summary = (entry.get("summary", "") or "")[:300]
+        article_lines.append(f"{i}. TITLE: {title}\n   SUMMARY: {summary}")
+
+    user_prompt = (
+        f"Bond group: {group_label}\n"
+        f"Ticker(s): {', '.join(tickers)}\n\n"
+        f"Candidate articles:\n" + "\n".join(article_lines)
+    )
+
+    try:
+        raw = _call_claude(_RELEVANCE_SYSTEM_PROMPT, user_prompt)
+        results = _parse_json_array(raw)
+    except Exception as e:
+        print(f"[warn] Claude relevance check failed for {group_label}: {e} "
+              f"— keeping all {len(entries)} candidate(s) unfiltered as fallback")
+        return [(entry, "") for entry in entries]
+
+    kept = []
+    for r in results:
+        idx = r.get("index")
+        if idx is None or not isinstance(idx, int) or not (0 <= idx < len(entries)):
+            continue
+        if r.get("relevant"):
+            kept.append((entries[idx], r.get("analysis", "")))
+    return kept
+
+
 def main():
     print(f"[{datetime.now(timezone.utc).isoformat()}] Starting run: "
           f"{len(PARENT_GROUPS)} corporate + {len(LOCATION_GROUPS)} local queries "
@@ -631,6 +744,25 @@ def main():
 
     seen = trim_seen(seen)
     save_seen(seen)
+
+    print(f"[{datetime.now(timezone.utc).isoformat()}] Assessing relevance with Claude...")
+    for parent in list(new_corporate.keys()):
+        entries = new_corporate[parent]
+        print(f"  assessing corporate: {parent} ({len(entries)} candidate(s))")
+        kept = assess_relevance(parent, PARENT_GROUPS[parent], entries)
+        if kept:
+            new_corporate[parent] = kept
+        else:
+            del new_corporate[parent]
+
+    for location in list(new_local.keys()):
+        entries = new_local[location]
+        print(f"  assessing local: {location} ({len(entries)} candidate(s))")
+        kept = assess_relevance(location, LOCATION_GROUPS[location], entries)
+        if kept:
+            new_local[location] = kept
+        else:
+            del new_local[location]
 
     if new_corporate or new_local:
         msg = build_email(new_corporate, new_local)

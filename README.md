@@ -73,13 +73,72 @@ Three layers of search, all feeding into a "Local / Site News" section:
    higher-reliability supplement to Google News search, since smaller
    regional outlets can be slow to surface or rank low in search results —
    this is what originally caught the NV Energy/Tract lawsuit story.
+5. **Relevance + impact analysis (Claude)** — the four layers above are a
+   recall tool, not a precision tool: keyword matches produce real noise
+   (a "lawsuit" keyword can just as easily hit a generic legal-blog
+   explainer about crypto disclosure law as an actual lawsuit against a
+   tenant). Every batch of keyword-matched candidates for a bond/location
+   group is sent to Claude, which decides (a) is this actually about this
+   specific issuer/site, not a coincidental keyword overlap, and (b) is it
+   plausibly market-moving/credit-relevant — then writes a 1-2 sentence
+   bond-specific impact note for anything that passes. Only items that
+   pass both checks make it into the email. If the Claude call fails for
+   any reason, that group's candidates are kept unfiltered (fails open,
+   logged as a warning) rather than silently dropping the whole run's
+   alerts.
 
 All four layers use Google News RSS or direct outlet RSS (free, no API
 key). Every article's link is hashed and checked against a persisted
 `seen_articles.json` state file, so re-runs only alert on genuinely new
 stories. Old entries are trimmed after 14 days. Emails a single digest per
 run, split into "Corporate News" and "Local / Site News" sections, via
-Gmail SMTP — only sent if there's something new.
+the Resend API — only sent if there's something new.
+
+**Quality controls:**
+- **Hard 2-week age cutoff** — no article older than 14 days can appear in
+  an alert, regardless of source. Google News's `when:1d` filter is
+  best-effort, not a guarantee, and the site-specific/curated-feed layers
+  have no date filtering of their own, so this is enforced directly on
+  each entry's published date.
+- **Anchor-term requirement** — site-specific and curated-feed matches
+  require a data-center/energy anchor term (`data center`, `datacenter`,
+  `compute`, `hyperscale`, plus the local keyword list) to co-occur with
+  the specific identifying term. Several utility/county names are common
+  enough to appear in unrelated local news on their own — e.g. a bare
+  "Whitfield County" match once pulled in a high-school volleyball
+  recap — so those terms alone are no longer sufficient.
+- **Fuzzy headline dedup** — the same story from two outlets (e.g. a wire
+  story picked up by both a local paper and a national one) often has
+  different URLs and slightly reworded headlines, which URL-hash dedup
+  alone doesn't catch. Every new article's title is normalized (Google
+  News's " - Source Name" suffix stripped, lowercased, punctuation
+  collapsed) and compared against previously-seen titles using
+  `difflib.SequenceMatcher`; anything ≥85% similar is treated as the same
+  story and suppressed, even though the link differs. This persists
+  across runs via `seen_articles.json`, same as the URL-based dedup.
+
+## Cron schedule / quiet hours
+
+Railway cron always evaluates in **UTC**, with no timezone override
+available. To run hourly from 6am–6pm Eastern and stay silent overnight,
+set the Cron Schedule (Settings → Cron Schedule) to:
+
+```
+0 10-22 * * *
+```
+
+(6am ET = 10:00 UTC, 6pm ET = 22:00 UTC, during Eastern Daylight Time.)
+
+**This needs manual updating twice a year for DST.** When clocks fall
+back (EST = UTC-5, typically early November), change it to:
+
+```
+0 11-23 * * *
+```
+
+and back to `0 10-22 * * *` when clocks spring forward again in March.
+Railway has no timezone-aware cron option, so there's no way to avoid
+this without running a separate always-on scheduler process.
 
 **Coverage gaps to know about:** `SITE_KEYWORDS` and `CURATED_FEEDS` are
 populated for most sites but not exhaustively verified — the curated feed
@@ -131,6 +190,11 @@ Service → **Variables**:
 - `RESEND_API_KEY`
 - `EMAIL_FROM` (e.g. `alerts@yourdomain.com`, must be on the verified domain)
 - `ALERT_EMAIL_TO`
+- `ANTHROPIC_API_KEY` — from https://console.anthropic.com/settings/keys.
+  Used for the relevance/impact-analysis step. Cost is low at this volume:
+  each API call only fires for groups that actually have new candidate
+  articles (typically a handful per run, often zero), using Haiku (the
+  cheapest current model).
 - `SEEN_FILE_PATH` = `/data/seen_articles.json`
 
 ## 5. Attach a Volume (important — persists dedupe state)
@@ -169,6 +233,7 @@ pip install -r requirements.txt
 export RESEND_API_KEY="re_xxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 export EMAIL_FROM="alerts@yourdomain.com"
 export ALERT_EMAIL_TO="you@example.com"
+export ANTHROPIC_API_KEY="sk-ant-xxxxxxxxxxxxxxxxxxxxxxxx"
 python monitor.py
 ```
 

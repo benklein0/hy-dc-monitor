@@ -73,7 +73,34 @@ Three layers of search, all feeding into a "Local / Site News" section:
    higher-reliability supplement to Google News search, since smaller
    regional outlets can be slow to surface or rank low in search results —
    this is what originally caught the NV Energy/Tract lawsuit story.
-5. **Relevance + impact analysis (Claude)** — the four layers above are a
+5. **Raw, ungated recall search** — every other layer above requires
+   co-occurrence with some anchor vocabulary (zoning, utility, lawsuit,
+   etc.), which is good for precision but means a genuinely relevant
+   article that just doesn't happen to use any of that vocabulary would
+   never be found at all — a search-layer coverage gap that no amount of
+   downstream filtering can fix. This layer searches only the bare
+   location name (`fetch_raw_location_news`) or, for parents that
+   actually trade publicly, the real equity ticker
+   (`fetch_raw_ticker_news`, via `PUBLIC_TICKER_OVERRIDE` — note most of
+   the "tickers" in `BONDS` are internal bond/SPV shorthand, not real
+   stock symbols, so this only applies to APLD, CIFR, CORZ, CRWV, WULF,
+   and Galaxy Digital's real ticker GLXY). This is deliberately noisier
+   than the other layers; the extra noise is handled downstream by the
+   same Claude assessment as everything else, so a genuine hit here can
+   land in the main alert, not just the review digest — this layer isn't
+   just diagnostic, it actively closes real coverage gaps.
+
+   **Exception**: `RAW_LOCATION_SEARCH_EXCLUDE` skips this layer entirely
+   for large/generic metro locations (currently Austin, TX and Chicago,
+   IL) where a bare-name search returns enormous unrelated daily news
+   volume (Tesla launch events, obituaries, local sports, everything) —
+   exactly the flood the anchor-term gating on `fetch_local_news` exists
+   to prevent. A batch large enough can overwhelm a single Claude call
+   and previously triggered a fail-open that dumped dozens of irrelevant
+   articles straight into the main alert; see the batching and fail-open
+   fixes below for the general-purpose backstops, and this exclusion for
+   removing the risk at the source for known-bad locations.
+6. **Relevance + impact analysis (Claude)** — the five layers above are a
    recall tool, not a precision tool: keyword matches produce real noise
    (a "lawsuit" keyword can just as easily hit a generic legal-blog
    explainer about crypto disclosure law as an actual lawsuit against a
@@ -144,6 +171,56 @@ the Resend API — only sent if there's something new.
   `difflib.SequenceMatcher`; anything ≥85% similar is treated as the same
   story and suppressed, even though the link differs. This persists
   across runs via `seen_articles.json`, same as the URL-based dedup.
+- **Cross-run semantic-duplicate memory** — fuzzy title matching only
+  catches near-identical wording. It won't catch "SB Energy files for
+  IPO" and "American data center operator SB Energy is planning an IPO"
+  as the same story, even though they clearly are — the wording differs
+  too much. To catch this, every bond group's *already-alerted* headlines
+  (from `strict_relevant` verdicts, recorded back into `seen_articles.json`
+  after each run) are passed to Claude as context for the next
+  `RECENTLY_ALERTED_LOOKBACK_DAYS` (10) days, with instructions to check
+  new candidates for a semantic — not just textual — match, and mark a
+  re-reported version of an already-covered fact as non-incremental. This
+  is what actually stops the same underlying story from re-appearing in
+  the main alert every time a different outlet picks it up.
+- **3-day hard age cutoff** (`MAX_ARTICLE_AGE_DAYS`) — tightened from an
+  earlier 14-day version after a Denton, TX article with an actual byline
+  of Aug 21 surfaced in a Sept 3 run (13 days old — technically inside a
+  14-day window, but obviously stale for a feed that runs hourly).
+  Google's `when:1d` filter is best-effort, not exact, so this is the
+  real enforcement point; there's little reason a genuinely new story
+  should be more than a couple days old by the time some layer surfaces
+  it, given the hourly cadence.
+- **Hard source blocklist** (`BLOCKED_SOURCES`) — some outlets are
+  structurally secondary/opinion by nature (contributor-driven stock
+  commentary, technical analysis, content-mill sites), not primary
+  reporting, regardless of what any individual article says. Rather than
+  relying on the LLM to catch every instance, these are blocked outright
+  before an article is even considered a candidate: currently Seeking
+  Alpha, Motley Fool, Zacks, Benzinga, InvestorPlace, MarketBeat, Simply
+  Wall St, GuruFocus, Insider Monkey, TipRanks, Barchart, 24/7 Wall St.
+  Matched against the article's source name (or the " - Source Name"
+  suffix Google News appends to titles), not the link domain — Google
+  News RSS wraps links through news.google.com, so the true publisher
+  domain usually isn't recoverable from the link itself. Add more names
+  to the `BLOCKED_SOURCES` set in `monitor.py` as needed; blocked items
+  are logged as `[blocked source]` in the Railway deploy logs.
+- **Batch-size protection** (`MAX_CANDIDATES_PER_CLAUDE_CALL`) — an
+  unusually large candidate batch (63 articles once got pulled for
+  Austin, TX in one run, driven by an unrelated Tesla launch event that
+  happened to dominate that day's local news) risks overflowing a single
+  Claude call's response and causing it to fail. Batches larger than 25
+  are automatically split into multiple calls rather than risking that.
+- **Fail-open never reaches the main alert.** If a Claude call fails
+  (bad key, API outage, oversized/truncated response) after retries,
+  that batch's candidates are routed to the QC review digest only —
+  unfiltered, tagged `(unassessed — Claude call failed)` — never to the
+  main alert that goes to the full distribution. A previous version of
+  this logic defaulted to "keep everything, send it," which once dumped
+  dozens of completely unrelated articles (Tesla news, obituaries, local
+  sports) into the main alert when a batch failed. A noisy review digest
+  that only reaches you is a recoverable failure mode; flooding
+  colleagues' inboxes with unfiltered junk is not.
 
 ## Cron schedule / quiet hours
 
@@ -273,9 +350,10 @@ You'll see a log line: "Sent alert with N new item(s)" or "No new items."
 
 ## Tuning notes
 
-- **~60 total RSS calls per run** (12 corporate + 19 local + 18 site-specific
-  + 11 curated feed polls), spaced 1.5s apart (~90s total runtime) — well
-  within Google News RSS's practical rate limits at hourly cadence.
+- **~90 total RSS calls per run** (13 corporate + 20 local + 6 raw ticker +
+  19 site-specific + 12 curated feed polls + 20 raw location), spaced 1.5s
+  apart between locations/parents — a few minutes total runtime, still
+  well within Google News RSS's practical rate limits at hourly cadence.
 - If a specific location is too noisy or too quiet, adjust its query
   precision in `LOCAL_KEYWORDS` or add a more specific place name (e.g.
   swap "Austin, Texas" for a more precise sub-area if it's picking up

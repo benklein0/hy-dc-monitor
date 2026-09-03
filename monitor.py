@@ -470,6 +470,25 @@ def trim_seen(seen):
     return {k: v for k, v in seen.items() if v.get("first_seen", 0) > cutoff}
 
 
+# How far back to look when telling Claude what's already been alerted on
+# for a given bond group, for semantic-duplicate detection (catching the
+# same underlying story reworded by a different outlet — e.g. "SB Energy
+# files for IPO" vs "American data center operator SB Energy is planning
+# an IPO" — which fuzzy title-matching alone won't catch since the wording
+# differs too much). Kept shorter than MAX_SEEN_AGE_DAYS (which governs how
+# long we remember hashes purely for exact-dedup purposes).
+RECENTLY_ALERTED_LOOKBACK_DAYS = 10
+
+
+def _recent_alerted_titles(seen, tag, max_age_days=RECENTLY_ALERTED_LOOKBACK_DAYS):
+    cutoff = time.time() - max_age_days * 86400
+    return [
+        v["title"] for v in seen.values()
+        if v.get("tag") == tag and v.get("strict_relevant") and v.get("title")
+        and v.get("first_seen", 0) > cutoff
+    ]
+
+
 def article_key(entry):
     basis = entry.get("link") or entry.get("title", "")
     return hashlib.sha256(basis.encode("utf-8")).hexdigest()
@@ -477,9 +496,14 @@ def article_key(entry):
 
 # Hard cutoff: nothing older than this ever makes it into an alert, no
 # matter the source. Google News's "when:1d" is a best-effort filter, not
-# a guarantee, and curated/site-specific RSS feeds have no date filtering
-# at all — so this is the actual enforcement point.
-MAX_ARTICLE_AGE_DAYS = 14
+# a guarantee (a Denton, TX article with an actual Aug 21 byline once
+# surfaced in a Sept 3 run, 13 days later — within the old 14-day cutoff
+# but obviously stale for an hourly-cadence feed), and curated/site-specific
+# RSS feeds have no date filtering of their own at all — so this is the
+# actual enforcement point. Kept short since this runs hourly; there's no
+# reason a genuinely new story should be more than a couple days old by
+# the time some layer surfaces it.
+MAX_ARTICLE_AGE_DAYS = 3
 
 
 def _is_recent_enough(entry, max_age_days=MAX_ARTICLE_AGE_DAYS):
@@ -611,6 +635,21 @@ def fetch_raw_ticker_news(parent_name):
     return fetch_news(f'"{ticker}"')
 
 
+# Locations too large/generic for a bare-name search to be useful — these
+# are real cities with enormous daily news volume unrelated to the site
+# (Austin: Tesla/SXSW/state politics/every local human-interest story;
+# Chicago: similarly enormous). A raw search here doesn't meaningfully
+# improve recall (the gated fetch_local_news + fetch_site_specific_news
+# layers already cover these) and risks generating a candidate batch large
+# enough to overwhelm a single Claude call. This is exactly the flood
+# fetch_local_news's anchor-term gating exists to prevent — skip the raw
+# layer for these specifically rather than reopening that hole.
+RAW_LOCATION_SEARCH_EXCLUDE = {
+    "Austin, Texas",
+    "Chicago, Illinois",
+}
+
+
 def fetch_raw_location_news(location):
     """Raw, ungated search on just the bare location name — no anchor-term
     or keyword requirement. Broader and noisier than fetch_local_news, by
@@ -618,7 +657,11 @@ def fetch_raw_location_news(location):
     relevant site-level article doesn't use any of our anchor vocabulary
     (zoning, utility, lawsuit, etc.). The extra noise this produces is
     handled downstream by the Claude on_topic/market_moving check, same
-    as every other layer."""
+    as every other layer — except for RAW_LOCATION_SEARCH_EXCLUDE, where
+    the location name alone is too generic/high-volume for this to be
+    safe at any batch size."""
+    if location in RAW_LOCATION_SEARCH_EXCLUDE:
+        return []
     return fetch_news(f'"{location}"')
 
 
@@ -845,11 +888,27 @@ def _bond_detail_lines(tickers):
     return "\n".join(lines)
 
 
-def assess_relevance(group_label, tickers, entries, context_type):
+# Max candidates sent to Claude in a single call. A batch this size, each
+# needing a JSON verdict object, comfortably fits within a few thousand
+# output tokens; batches larger than this (which can happen when the raw,
+# ungated search — see fetch_raw_location_news — hits a location with a
+# lot of unrelated daily news volume) get split into multiple calls
+# instead of risking a truncated/failed response that would otherwise
+# fail-open an enormous batch into the review digest at once.
+MAX_CANDIDATES_PER_CLAUDE_CALL = 25
+
+
+def assess_relevance(group_label, tickers, entries, context_type, previously_alerted_titles=None):
     """Assesses every keyword-matched candidate for genuine relevance,
     bond-specificity, and materiality. context_type is "corporate" or
     "local" — it changes how strictly the relevance bar is applied (see
-    system prompt).
+    system prompt). previously_alerted_titles (optional) is a list of
+    headlines already sent in the main alert for this same bond group in
+    the recent past — passed as context so Claude can catch the same
+    underlying story reworded by a different outlet (fuzzy title-matching
+    alone misses this when the wording differs enough, e.g. "SB Energy
+    files for IPO" vs "American data center operator SB Energy is
+    planning an IPO").
 
     Returns a list of dicts, one per input entry, in the same order:
     [{"entry": entry, "on_topic": bool, "market_moving": bool,
@@ -863,11 +922,26 @@ def assess_relevance(group_label, tickers, entries, context_type):
     rejected articles (useful for auditing quiet runs: was there really
     no news, or did something get wrongly filtered?).
 
-    Fails open (marks all candidates relevant, unanalyzed) if the API
-    call or response parsing fails, rather than silently dropping
-    everything — a noisy run is recoverable, a silently empty one isn't."""
+    Splits into multiple calls if there are more than
+    MAX_CANDIDATES_PER_CLAUDE_CALL entries, so an unusually large batch
+    can't overflow a single response and force a fail-open on everything
+    at once.
+
+    Fails open to the review digest only (never the main alert) if a
+    call or its response parsing fails, rather than silently dropping
+    everything — a noisy review digest is recoverable and only reaches
+    you; flooding the shared main alert with unfiltered junk is not."""
     if not entries:
         return []
+
+    if len(entries) > MAX_CANDIDATES_PER_CLAUDE_CALL:
+        print(f"    [batching] {group_label}: {len(entries)} candidates exceeds "
+              f"{MAX_CANDIDATES_PER_CLAUDE_CALL}, splitting into multiple calls")
+        results = []
+        for start in range(0, len(entries), MAX_CANDIDATES_PER_CLAUDE_CALL):
+            chunk = entries[start:start + MAX_CANDIDATES_PER_CLAUDE_CALL]
+            results.extend(assess_relevance(group_label, tickers, chunk, context_type, previously_alerted_titles))
+        return results
 
     article_lines = []
     for i, entry in enumerate(entries):
@@ -875,23 +949,39 @@ def assess_relevance(group_label, tickers, entries, context_type):
         summary = (entry.get("summary", "") or "")[:500]
         article_lines.append(f"{i}. TITLE: {title}\n   SUMMARY: {summary}")
 
+    if previously_alerted_titles:
+        prior_block = (
+            "\n\nHeadlines ALREADY SENT in the main alert for this bond group in the "
+            f"last {RECENTLY_ALERTED_LOOKBACK_DAYS} days (do not re-alert on the same "
+            "underlying event/story under different wording — check each candidate "
+            "against these for a semantic match, not just exact text overlap; if a "
+            "candidate covers the same fact already sent, mark primary_incremental=false "
+            "unless it adds a genuinely new incremental development beyond what's listed "
+            "here):\n" + "\n".join(f"- {t}" for t in previously_alerted_titles)
+        )
+    else:
+        prior_block = ""
+
     user_prompt = (
         f"Search context: {context_type.upper()}\n"
         f"Bond group: {group_label}\n"
-        f"Bond detail:\n{_bond_detail_lines(tickers)}\n\n"
+        f"Bond detail:\n{_bond_detail_lines(tickers)}"
+        f"{prior_block}\n\n"
         f"Candidate articles:\n" + "\n".join(article_lines)
     )
 
     try:
-        raw = _call_claude(_RELEVANCE_SYSTEM_PROMPT, user_prompt)
+        raw = _call_claude(_RELEVANCE_SYSTEM_PROMPT, user_prompt, max_tokens=4096)
         results = _parse_json_array(raw)
     except Exception as e:
         print(f"[warn] Claude relevance check failed for {group_label}: {e} "
-              f"— keeping all {len(entries)} candidate(s) unfiltered as fallback")
+              f"— routing all {len(entries)} candidate(s) to the review digest only "
+              f"(fail-open never goes to the main alert, to avoid a technical failure "
+              f"flooding the shared distribution)")
         return [{
-            "entry": entry, "on_topic": True, "market_moving": True, "primary_incremental": True,
-            "strict_relevant": True, "broad_relevant": True,
-            "analysis": "(unfiltered — Claude call failed)",
+            "entry": entry, "on_topic": True, "market_moving": False, "primary_incremental": False,
+            "strict_relevant": False, "broad_relevant": True,
+            "analysis": "(unassessed — Claude call failed; routed here for manual review rather than the main alert)",
         } for entry in entries]
 
     by_index = {}
@@ -981,34 +1071,41 @@ def main():
         time.sleep(REQUEST_DELAY_SECONDS)
 
     seen = trim_seen(seen)
-    save_seen(seen)
 
     print(f"[{datetime.now(timezone.utc).isoformat()}] Assessing relevance with Claude...")
 
     strict_corporate, strict_local = {}, {}
     broad_corporate, broad_local = {}, {}  # on-topic but excluded from strict — for QC review only
 
-    def _log_and_split(verdicts):
+    def _log_split_and_record(verdicts, tag):
         strict_items = []
         broad_extra_items = []
         for v in verdicts:
             title = v["entry"].get("title", "Untitled")
             link = v["entry"].get("link", "")
-            tag = "KEPT" if v["strict_relevant"] else "rejected"
-            print(f"    [{tag}] {title}")
+            log_tag = "KEPT" if v["strict_relevant"] else "rejected"
+            print(f"    [{log_tag}] {title}")
             print(f"           {link}")
             print(f"           reason: {v['analysis']}")
             if v["strict_relevant"]:
                 strict_items.append((v["entry"], v["analysis"]))
             elif v["broad_relevant"]:
                 broad_extra_items.append((v["entry"], v["analysis"]))
+            # Record the verdict back onto the seen entry so future runs
+            # can tell Claude "this was already sent in the main alert" —
+            # this is what powers cross-run semantic-duplicate detection.
+            key = article_key(v["entry"])
+            if key in seen:
+                seen[key]["strict_relevant"] = v["strict_relevant"]
         return strict_items, broad_extra_items
 
     for parent in list(new_corporate.keys()):
         entries = new_corporate[parent]
         print(f"  assessing corporate: {parent} ({len(entries)} candidate(s))")
-        verdicts = assess_relevance(parent, PARENT_GROUPS[parent], entries, context_type="corporate")
-        strict_items, broad_extra_items = _log_and_split(verdicts)
+        prior_titles = _recent_alerted_titles(seen, f"corp:{parent}")
+        verdicts = assess_relevance(parent, PARENT_GROUPS[parent], entries, context_type="corporate",
+                                     previously_alerted_titles=prior_titles)
+        strict_items, broad_extra_items = _log_split_and_record(verdicts, f"corp:{parent}")
         if strict_items:
             strict_corporate[parent] = strict_items
         if broad_extra_items:
@@ -1017,12 +1114,16 @@ def main():
     for location in list(new_local.keys()):
         entries = new_local[location]
         print(f"  assessing local: {location} ({len(entries)} candidate(s))")
-        verdicts = assess_relevance(location, LOCATION_GROUPS[location], entries, context_type="local")
-        strict_items, broad_extra_items = _log_and_split(verdicts)
+        prior_titles = _recent_alerted_titles(seen, f"local:{location}")
+        verdicts = assess_relevance(location, LOCATION_GROUPS[location], entries, context_type="local",
+                                     previously_alerted_titles=prior_titles)
+        strict_items, broad_extra_items = _log_split_and_record(verdicts, f"local:{location}")
         if strict_items:
             strict_local[location] = strict_items
         if broad_extra_items:
             broad_local[location] = broad_extra_items
+
+    save_seen(seen)
 
     if strict_corporate or strict_local:
         msg = build_email(strict_corporate, strict_local)

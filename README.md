@@ -78,14 +78,42 @@ Three layers of search, all feeding into a "Local / Site News" section:
    (a "lawsuit" keyword can just as easily hit a generic legal-blog
    explainer about crypto disclosure law as an actual lawsuit against a
    tenant). Every batch of keyword-matched candidates for a bond/location
-   group is sent to Claude, which decides (a) is this actually about this
-   specific issuer/site, not a coincidental keyword overlap, and (b) is it
-   plausibly market-moving/credit-relevant — then writes a 1-2 sentence
-   bond-specific impact note for anything that passes. Only items that
-   pass both checks make it into the email. If the Claude call fails for
-   any reason, that group's candidates are kept unfiltered (fails open,
-   logged as a warning) rather than silently dropping the whole run's
-   alerts.
+   group is sent to Claude, which scores each article on three
+   *independent* criteria rather than one combined yes/no:
+   - `on_topic` — is this actually about this specific issuer/site, not a
+     coincidental keyword overlap or unrelated company?
+   - `market_moving` — is it plausibly credit-relevant for this bond?
+     Local/site-level news (permitting, zoning, utility disputes,
+     litigation tied to the site) is held to a moderate bar, since it's
+     often the earliest and most important signal for this kind of debt.
+     Corporate-level news (financing, valuation milestones, general PR)
+     is held to a higher bar — it needs a stated mechanism tying it to
+     this bond's actual economics, not just a headline number.
+   - `primary_incremental` — is this original reporting of a new fact,
+     not derivative commentary (stock technical-analysis, "why X stock
+     moved today" pieces) or a rehash/recap of already-reported facts?
+
+   **Two emails come out of this**: the main alert requires all three
+   criteria (`strict_relevant`), and a second **review digest** requires
+   only `on_topic` — so anything that was at least genuinely about a
+   tracked issuer/site, but got excluded from the main alert for not
+   being material or not being primary reporting, shows up there instead
+   with a note on which criterion it failed. This is a QC tool for
+   tuning the filter itself: if something in the review digest looks
+   like it should have been in the main alert, that's a signal to adjust
+   the prompt. The main alert goes to `ALERT_EMAIL_TO`; the review digest
+   goes to `REVIEW_EMAIL_TO` (defaults to just the first `ALERT_EMAIL_TO`
+   address, not the whole distribution).
+
+   For every candidate — kept, reviewed, or fully rejected — the full
+   verdict and reason gets printed to the Railway deploy logs, so a
+   quiet run (no email at all) can be audited directly: did the keyword
+   search find nothing, or did Claude reject something that shouldn't
+   have been rejected?
+
+   If the Claude call fails for any reason, that group's candidates are
+   kept unfiltered in the main alert (fails open, logged as a warning)
+   rather than silently dropping the whole run's alerts.
 
 All four layers use Google News RSS or direct outlet RSS (free, no API
 key). Every article's link is hashed and checked against a persisted
@@ -190,6 +218,10 @@ Service → **Variables**:
 - `RESEND_API_KEY`
 - `EMAIL_FROM` (e.g. `alerts@yourdomain.com`, must be on the verified domain)
 - `ALERT_EMAIL_TO`
+- `REVIEW_EMAIL_TO` (optional) — recipient(s) for the broader QC/review
+  digest (see below). Defaults to just the first `ALERT_EMAIL_TO` address
+  if unset, since this is a tuning tool, not something the full
+  distribution needs.
 - `ANTHROPIC_API_KEY` — from https://console.anthropic.com/settings/keys.
   Used for the relevance/impact-analysis step. Cost is low at this volume:
   each API call only fires for groups that actually have new candidate

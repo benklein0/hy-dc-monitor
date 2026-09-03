@@ -396,6 +396,18 @@ ALERT_EMAIL_TO = [
     if addr.strip()
 ]
 
+# Recipients for the broader QC/review digest (on-topic items excluded from
+# the strict alert, for tuning filter accuracy). Defaults to just the first
+# ALERT_EMAIL_TO address rather than the full distribution — this is a
+# tuning tool, not something colleagues need cluttering their inbox with.
+# Set explicitly to override, e.g. to send it to nobody functionally by
+# pointing it at an address you don't check, or to broaden it later.
+REVIEW_EMAIL_TO = [
+    addr.strip()
+    for addr in os.environ.get("REVIEW_EMAIL_TO", ALERT_EMAIL_TO[0]).split(",")
+    if addr.strip()
+]
+
 
 # ---------------------------------------------------------------------------
 # Derived lookup tables: unique parents / locations -> tickers referencing them
@@ -556,12 +568,13 @@ def _render_items_text(items):
     return "\n".join(lines)
 
 
-def build_email(new_corporate, new_local):
+def build_email(new_corporate, new_local, subject_prefix="HY Datacenter News Alert",
+                 intro="New, market-relevant news for tracked HY datacenter bonds"):
     total = sum(len(v) for v in new_corporate.values()) + sum(len(v) for v in new_local.values())
-    subject = f"HY Datacenter News Alert — {total} new item{'s' if total != 1 else ''}"
+    subject = f"{subject_prefix} — {total} new item{'s' if total != 1 else ''}"
 
-    html_parts = [f"<p>New, market-relevant news for tracked HY datacenter bonds (last {LOOKBACK_WINDOW}):</p>"]
-    text_parts = ["New, market-relevant news for tracked HY datacenter bonds:"]
+    html_parts = [f"<p>{intro} (last {LOOKBACK_WINDOW}):</p>"]
+    text_parts = [f"{intro}:"]
 
     if new_corporate:
         html_parts.append("<h2>Corporate News</h2>")
@@ -589,7 +602,7 @@ def build_email(new_corporate, new_local):
     return {"subject": subject, "html": html, "text": text}
 
 
-def send_email(msg):
+def send_email(msg, recipients=None):
     resp = requests.post(
         "https://api.resend.com/emails",
         headers={
@@ -598,7 +611,7 @@ def send_email(msg):
         },
         json={
             "from": EMAIL_FROM,
-            "to": ALERT_EMAIL_TO,
+            "to": recipients if recipients is not None else ALERT_EMAIL_TO,
             "subject": msg["subject"],
             "html": msg["html"],
             "text": msg["text"],
@@ -672,29 +685,18 @@ _RELEVANCE_SYSTEM_PROMPT = """You are a high-yield credit analyst screening news
 
 You will be given a bond/issuer group (ticker(s) with coupon/maturity, tenant, and lease structure; issuer name; site location; whether this is a LOCAL/SITE-level search or a CORPORATE-level search) and a list of candidate news articles that matched a keyword search. The keyword search is deliberately broad and produces a lot of noise — coincidental keyword overlaps, generic legal-explainer content, unrelated companies, routine local news with no real connection to this issuer or site, and derivative commentary that isn't actual new reporting.
 
-For EACH article, decide:
-1. Is it actually about this specific issuer, its tenant, or this specific site/location — not just a coincidental keyword match?
-2. Is it plausibly market-moving or credit-relevant for this bond?
-3. Is it primary, incremental reporting — an actual new fact or development — rather than derivative commentary or a rehash? Reject anything whose content is fundamentally reactive/secondary rather than a new underlying fact.
+This feed generates two outputs from the same assessment: a STRICT digest (only genuinely material, primary, on-topic news) and a BROADER review digest (anything on-topic at all, for manual QC of whether the strict filter is too aggressive). To support both, score each article on three SEPARATE, independent criteria rather than one combined yes/no:
 
-On weighting LOCAL vs. CORPORATE news (criterion 2): this system exists specifically because for site-specific HY project-finance datacenter debt, LOCAL/SITE-level news — permitting and zoning votes or reversals, county/planning commission decisions, utility and interconnection disputes or delays, tax abatement votes, litigation tied to the specific site, water/power use disputes, organized local opposition that could affect timeline — is very often the single most important, earliest credit signal, even when it doesn't resemble traditional "market-moving" corporate news. When the search context is LOCAL/SITE-level, apply a MODERATE bar: genuine, confirmed site-specific governmental/regulatory/utility/litigation developments should be marked relevant even if their scale seems modest, because early local signals on permitting or utility disputes are exactly what this feed is for. When the search context is CORPORATE-level, apply a HIGHER bar: require a clear, specific tie to this bond's actual economics (the tenant's ability to pay under the lease, the issuer's financing, ratings, litigation) — general company profiles, valuation milestones, or PR without a specific credit-relevant mechanism should usually be marked not relevant unless the connection to this bond's cash flows or collateral is direct and explained.
+1. "on_topic": Is this article actually about this specific issuer, its tenant, or this specific site/location — not just a coincidental keyword match, not an unrelated company, not generic content (legal explainers, routine local news like sports/weather with no substantive tie)? This is the only bar for "is this worth a human's attention to review at all."
+2. "market_moving": Is it plausibly market-moving or credit-relevant for this bond? On weighting LOCAL vs. CORPORATE: LOCAL/SITE-level news (permitting/zoning votes or reversals, county/planning commission decisions, utility/interconnection disputes or delays, tax abatement votes, litigation tied to the specific site, water/power use disputes, organized local opposition affecting timeline) is very often the single most important, earliest credit signal for this kind of debt — apply a MODERATE bar here: genuine, confirmed site-specific developments count even if modest in scale. For CORPORATE-level news, apply a HIGHER bar: require a clear, specific, stated mechanism tying it to this bond's actual economics (tenant ability-to-pay, issuer financing, ratings, litigation, use-of-proceeds affecting this site). Valuation milestones, funding-round announcements, or "milestone reached" PR that state a headline number WITHOUT a specific stated mechanism connecting it to this bond's cash flows, collateral, or counterparty risk should be market_moving=false — a valuation figure alone doesn't tell you if lease terms or ability-to-pay changed.
+3. "primary_incremental": Is this primary, incremental reporting — an actual new fact or development — rather than derivative commentary or a rehash? Mark false for: stock technical-analysis/price-action commentary ("why X stock moved today", chart/momentum pieces, "stocks to watch" listicles), opinion/recap/"explainer" pieces restating previously reported facts, aggregator/wire rehashes with no new information beyond a prior article.
 
-Mark NOT relevant regardless of context:
-- Generic explainer/legal-blog content not about this issuer
-- Unrelated companies/entities that happen to share a keyword
-- Routine local news (sports, weather, general community events) with no substantive connection to this bond
-- Stock technical-analysis or price-action commentary ("why X stock moved today", chart/momentum/analyst-rating pieces, "3 stocks to watch" listicles) — these react to price action, they are not news about the issuer itself
-- Opinion, recap, or "explainer" pieces that just restate or synthesize previously reported facts without any new development
-- Aggregator/wire rehashes of a story with no new information beyond what a prior article already covered
-- Valuation milestones, funding-round announcements, or general "milestone reached" PR about a tenant/parent that state a headline number (e.g. "Company X hits $18B valuation") WITHOUT a specific, stated mechanism connecting it to this bond's cash flows, collateral, or counterparty risk. A valuation figure alone does not tell you whether lease terms, tenant ability-to-pay, or site-level risk changed — it would not itself move trading in this bond. Only mark such items relevant if the article explicitly ties the raise/valuation to something mechanistic for this specific lease or site (e.g. stated use-of-proceeds funding this site's buildout, a covenant change, a stated liquidity commitment to this project).
-- Anything you're not reasonably confident is actually about this specific issuer/site
+Be reasonably generous on "on_topic" (that's the low bar for the review digest) but strict and precise on "market_moving" and "primary_incremental" (those gate the main alert). When genuinely uncertain on "on_topic," lean inclusive; when uncertain on the other two, lean toward false.
 
-When in doubt between "interesting but tangential" and "not relevant," or between "primary news" and "derivative commentary," mark it not relevant — this feed should be selective and only surface genuinely new, primary developments, not comprehensive coverage of everything mentioning these names.
-
-For each relevant article, the analysis must be specific to the bond(s) given — cite the actual ticker(s), and where it strengthens the point, the coupon/maturity, tenant, or lease structure provided (e.g. "credit positive for the 6.25% MERIDI notes due 4/30/31, where Fluidstack sits under a Google-guaranteed triple-net lease — reduced counterparty risk on the lease servicing the notes"). Do not write generically about "the parent company" when specific bond terms are available and relevant — reference the actual bond.
+For each article, always include a brief one-sentence "analysis": if on_topic and market_moving and primary_incremental are all true, a bond-specific impact citing the ticker and relevant bond terms (e.g. "credit positive for the 6.25% MERIDI notes due 4/30/31, where Fluidstack sits under a Google-guaranteed triple-net lease — reduced counterparty risk on the lease servicing the notes"). Otherwise, a brief reason noting which criterion failed and why (e.g. "on-topic but not market-moving: valuation milestone with no stated mechanism", "on-topic but derivative: recap of already-reported facts", "off-topic: unrelated company, coincidental keyword match"). Never leave analysis empty.
 
 Respond with ONLY a JSON array, no other text, no markdown code fences, one object per article in the same order given:
-[{"index": 0, "relevant": true, "analysis": "1-2 sentence bond-specific impact citing the ticker and relevant bond terms"}, {"index": 1, "relevant": false, "analysis": ""}]"""
+[{"index": 0, "on_topic": true, "market_moving": true, "primary_incremental": true, "analysis": "..."}, {"index": 1, "on_topic": true, "market_moving": false, "primary_incremental": true, "analysis": "..."}]"""
 
 
 def _call_claude(system_prompt, user_prompt, max_tokens=2000):
@@ -744,15 +746,26 @@ def _bond_detail_lines(tickers):
 
 
 def assess_relevance(group_label, tickers, entries, context_type):
-    """Filters a batch of keyword-matched candidates down to genuinely
-    relevant, bond-specific, market-moving items, each paired with a short
-    impact analysis. context_type is "corporate" or "local" — it changes
-    how strictly the relevance bar is applied (see system prompt). Returns
-    a list of (entry, analysis) tuples.
+    """Assesses every keyword-matched candidate for genuine relevance,
+    bond-specificity, and materiality. context_type is "corporate" or
+    "local" — it changes how strictly the relevance bar is applied (see
+    system prompt).
 
-    Fails open (keeps all candidates, unanalyzed) if the API call or
-    response parsing fails, rather than silently dropping everything —
-    a noisy run is recoverable, a silently empty one isn't."""
+    Returns a list of dicts, one per input entry, in the same order:
+    [{"entry": entry, "on_topic": bool, "market_moving": bool,
+      "primary_incremental": bool, "strict_relevant": bool,
+      "broad_relevant": bool, "analysis": str}, ...]
+    "strict_relevant" (all three criteria true) gates the main alert email.
+    "broad_relevant" (on_topic only) gates the broader QC/review digest.
+    "analysis" is always populated — a bond-specific impact note when
+    strict_relevant, a brief reason noting which criterion failed
+    otherwise — so the full verdict trail can be logged even for
+    rejected articles (useful for auditing quiet runs: was there really
+    no news, or did something get wrongly filtered?).
+
+    Fails open (marks all candidates relevant, unanalyzed) if the API
+    call or response parsing fails, rather than silently dropping
+    everything — a noisy run is recoverable, a silently empty one isn't."""
     if not entries:
         return []
 
@@ -775,16 +788,42 @@ def assess_relevance(group_label, tickers, entries, context_type):
     except Exception as e:
         print(f"[warn] Claude relevance check failed for {group_label}: {e} "
               f"— keeping all {len(entries)} candidate(s) unfiltered as fallback")
-        return [(entry, "") for entry in entries]
+        return [{
+            "entry": entry, "on_topic": True, "market_moving": True, "primary_incremental": True,
+            "strict_relevant": True, "broad_relevant": True,
+            "analysis": "(unfiltered — Claude call failed)",
+        } for entry in entries]
 
-    kept = []
+    by_index = {}
     for r in results:
         idx = r.get("index")
         if idx is None or not isinstance(idx, int) or not (0 <= idx < len(entries)):
             continue
-        if r.get("relevant"):
-            kept.append((entries[idx], r.get("analysis", "")))
-    return kept
+        by_index[idx] = r
+
+    verdicts = []
+    for i, entry in enumerate(entries):
+        r = by_index.get(i)
+        if r is None:
+            verdicts.append({
+                "entry": entry, "on_topic": False, "market_moving": False, "primary_incremental": False,
+                "strict_relevant": False, "broad_relevant": False,
+                "analysis": "(no verdict returned by Claude)",
+            })
+        else:
+            on_topic = bool(r.get("on_topic"))
+            market_moving = bool(r.get("market_moving"))
+            primary_incremental = bool(r.get("primary_incremental"))
+            verdicts.append({
+                "entry": entry,
+                "on_topic": on_topic,
+                "market_moving": market_moving,
+                "primary_incremental": primary_incremental,
+                "strict_relevant": on_topic and market_moving and primary_incremental,
+                "broad_relevant": on_topic,
+                "analysis": r.get("analysis", ""),
+            })
+    return verdicts
 
 
 def main():
@@ -833,31 +872,65 @@ def main():
     save_seen(seen)
 
     print(f"[{datetime.now(timezone.utc).isoformat()}] Assessing relevance with Claude...")
+
+    strict_corporate, strict_local = {}, {}
+    broad_corporate, broad_local = {}, {}  # on-topic but excluded from strict — for QC review only
+
+    def _log_and_split(verdicts):
+        strict_items = []
+        broad_extra_items = []
+        for v in verdicts:
+            title = v["entry"].get("title", "Untitled")
+            link = v["entry"].get("link", "")
+            tag = "KEPT" if v["strict_relevant"] else "rejected"
+            print(f"    [{tag}] {title}")
+            print(f"           {link}")
+            print(f"           reason: {v['analysis']}")
+            if v["strict_relevant"]:
+                strict_items.append((v["entry"], v["analysis"]))
+            elif v["broad_relevant"]:
+                broad_extra_items.append((v["entry"], v["analysis"]))
+        return strict_items, broad_extra_items
+
     for parent in list(new_corporate.keys()):
         entries = new_corporate[parent]
         print(f"  assessing corporate: {parent} ({len(entries)} candidate(s))")
-        kept = assess_relevance(parent, PARENT_GROUPS[parent], entries, context_type="corporate")
-        if kept:
-            new_corporate[parent] = kept
-        else:
-            del new_corporate[parent]
+        verdicts = assess_relevance(parent, PARENT_GROUPS[parent], entries, context_type="corporate")
+        strict_items, broad_extra_items = _log_and_split(verdicts)
+        if strict_items:
+            strict_corporate[parent] = strict_items
+        if broad_extra_items:
+            broad_corporate[parent] = broad_extra_items
 
     for location in list(new_local.keys()):
         entries = new_local[location]
         print(f"  assessing local: {location} ({len(entries)} candidate(s))")
-        kept = assess_relevance(location, LOCATION_GROUPS[location], entries, context_type="local")
-        if kept:
-            new_local[location] = kept
-        else:
-            del new_local[location]
+        verdicts = assess_relevance(location, LOCATION_GROUPS[location], entries, context_type="local")
+        strict_items, broad_extra_items = _log_and_split(verdicts)
+        if strict_items:
+            strict_local[location] = strict_items
+        if broad_extra_items:
+            broad_local[location] = broad_extra_items
 
-    if new_corporate or new_local:
-        msg = build_email(new_corporate, new_local)
-        send_email(msg)
-        total = sum(len(v) for v in new_corporate.values()) + sum(len(v) for v in new_local.values())
-        print(f"[{datetime.now(timezone.utc).isoformat()}] Sent alert with {total} new item(s).")
+    if strict_corporate or strict_local:
+        msg = build_email(strict_corporate, strict_local)
+        send_email(msg, recipients=ALERT_EMAIL_TO)
+        total = sum(len(v) for v in strict_corporate.values()) + sum(len(v) for v in strict_local.values())
+        print(f"[{datetime.now(timezone.utc).isoformat()}] Sent main alert with {total} new item(s).")
     else:
-        print(f"[{datetime.now(timezone.utc).isoformat()}] No new items this run.")
+        print(f"[{datetime.now(timezone.utc).isoformat()}] No new items for the main alert this run.")
+
+    if broad_corporate or broad_local:
+        review_msg = build_email(
+            broad_corporate, broad_local,
+            subject_prefix="HY Datacenter News — Broad Review (QC)",
+            intro="On-topic items excluded from the main alert — for reviewing whether the filter is too strict",
+        )
+        send_email(review_msg, recipients=REVIEW_EMAIL_TO)
+        total = sum(len(v) for v in broad_corporate.values()) + sum(len(v) for v in broad_local.values())
+        print(f"[{datetime.now(timezone.utc).isoformat()}] Sent review digest with {total} excluded-but-on-topic item(s) to {REVIEW_EMAIL_TO}.")
+    else:
+        print(f"[{datetime.now(timezone.utc).isoformat()}] No excluded-but-on-topic items for the review digest this run.")
 
 
 if __name__ == "__main__":

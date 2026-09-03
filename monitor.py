@@ -47,31 +47,49 @@ BONDS = {
         "name": "Applied Digital - APLD ComputeCo LLC",
         "parent": "Applied Digital",
         "locations": ["Ellendale, North Dakota"],
+        "coupon_maturity": "9.25% Sec. Notes due 12/15/30",
+        "tenant": "CoreWeave (META guarantee)",
+        "lease": "Modified Gross, 15yr",
     },
     "PFORGE": {
         "name": "Applied Digital - APLD ComputeCo 2 LLC",
         "parent": "Applied Digital",
         "locations": ["Harwood, North Dakota"],
+        "coupon_maturity": "6.75% Sec. Notes due 03/15/31",
+        "tenant": "Oracle",
+        "lease": "Double Net, 15yr/25yr w/ options",
     },
     "ELNFOR": {
         "name": "Applied Digital - APLD ComputeCo 3 LLC",
         "parent": "Applied Digital",
         "locations": ["Ellendale, North Dakota"],
+        "coupon_maturity": "7.00% Sec. Notes due 06/15/31",
+        "tenant": "CoreWeave (META guarantee)",
+        "lease": "Double Net, 15yr/30yr w/ options",
     },
     "CIFR": {
         "name": "Cipher Digital - Cipher Compute LLC",
         "parent": "Cipher Mining",
         "locations": ["Colorado City, Texas"],
+        "coupon_maturity": "7.125% Sec. Notes due 11/15/30",
+        "tenant": "Fluidstack (Google guarantee)",
+        "lease": "Double Net, 10yr",
     },
     "BLKPRL": {
         "name": "Cipher Digital - Black Pearl ComputeCo LLC",
         "parent": "Cipher Mining",
         "locations": ["Wink, Texas"],
+        "coupon_maturity": "6.125% Sec. Notes due 02/15/31",
+        "tenant": "AWS/Amazon",
+        "lease": "Triple Net, 15yr/30yr w/ options",
     },
     "STNGRY": {
         "name": "Cipher Digital - Stingray ComputCo LLC",
         "parent": "Cipher Mining",
         "locations": ["Andrews, Texas"],
+        "coupon_maturity": "6.00% Sec. Notes due 06/15/31",
+        "tenant": "AWS/Amazon",
+        "lease": "Triple Net, 15yr/30yr w/ options; no backup generators at AWS's request",
     },
     "CORZ": {
         "name": "Core Scientific Inc (Core Scientific Finance LLC)",
@@ -83,61 +101,97 @@ BONDS = {
             "Marble, North Carolina",
             "Austin, Texas",
         ],
+        "coupon_maturity": "7.75% Sec. Notes due 05/15/31",
+        "tenant": "CoreWeave",
+        "lease": "Modified Gross, 12yr w/ two 5yr options",
     },
     "CRWV": {
         "name": "CoreWeave Inc",
         "parent": "CoreWeave",
         "locations": [],  # 41 datacenters — too diffuse to search geographically
+        "coupon_maturity": "9.00% Sen. Unsec. Notes due 02/01/31",
+        "tenant": "MSFT, OpenAI, META, GOOGL",
+        "lease": "N/A (corporate unsecured, not a single-site lease structure)",
     },
     "EDGCOM": {
         "name": "Edged Compute LLC",
         "parent": "Edged Compute",
         "locations": ["Atlanta, Georgia", "Chicago, Illinois"],
+        "coupon_maturity": "7.50% Sec. Notes due 04/30/31",
+        "tenant": "Alibaba (Atlanta site), CoreWeave (Chicago site)",
+        "lease": "Atlanta: Modified Gross 15yr; Chicago: Triple Net 16yr",
     },
     "GALAXY": {
         "name": "Galaxy Helios Data Centers II LLC",
         "parent": "Galaxy Digital",
         "locations": ["Dickens County, Texas"],
+        "coupon_maturity": "9.875% Sec. Notes due 08/01/31",
+        "tenant": "CoreWeave",
+        "lease": "Double Net, 15yr w/ two 5yr options",
     },
     "MERIDI": {
         "name": "Next Frontier/Fluidstack JV - Meridian Arc Holdco LLC",
         "parent": "Next Frontier / Fluidstack JV",
         "locations": ["New Lebanon, Sullivan County, Indiana"],
+        "coupon_maturity": "6.25% Sec. Notes due 04/30/31",
+        "tenant": "Fluidstack (Google guarantee)",
+        "lease": "Triple Net, 15yr/30yr w/ options",
     },
     "ELKGVP": {
         "name": "Prime Data Centers, LLC - Elk Grove Village Property LLC",
         "parent": "Prime Data Centers",
         "locations": ["Elk Grove Village, Illinois"],
+        "coupon_maturity": "7.50% Sec. Notes due 06/15/31",
+        "tenant": "CoreWeave",
+        "lease": "Triple Net, 15yr/29yr w/ options",
     },
     "SECMOS": {
         "name": "SB Energy - SE Cosmos, LLC",
         "parent": "SB Energy",
         "locations": ["Austin, Texas"],
+        "coupon_maturity": "8.875% Sec. Notes due 05/01/31",
+        "tenant": "SoftBank (OpenAI ultimately)",
+        "lease": "Triple Net, 15yr/25yr w/ options",
     },
     "TRACTC": {
         "name": "Tract Capital/Fleet Data Centers - SV RNO Property Owner 1, LLC",
         "parent": "Tract / Fleet Data Centers",
         "locations": ["Storey County, Nevada"],
+        "coupon_maturity": "5.875% Sec. Notes due 03/01/31",
+        "tenant": "Nvidia",
+        "lease": "Triple Net, 16yr/36yr w/ options",
     },
     "TRACTD": {
         "name": "Tract Capital/Fleet Data Centers - PR RNO Property Owner 1, LLC",
         "parent": "Tract / Fleet Data Centers",
         "locations": ["Storey County, Nevada"],
+        "coupon_maturity": "6.50% Sec. Notes due 05/01/31",
+        "tenant": "Nvidia",
+        "lease": "Triple Net, 16yr/36yr w/ options",
     },
     "WULF": {
         "name": "TeraWulf - WULF Compute LLC",
         "parent": "TeraWulf",
         "locations": ["Barker, New York"],
+        "coupon_maturity": "7.75% Sec. Notes due 10/15/30",
+        "tenant": "La Lupa campus: Core42/G42 (Abu Dhabi guarantee); Akela campus: Fluidstack (Google guarantee)",
+        "lease": "Modified Gross, 10yr (both campuses)",
     },
     "FLASHC": {
         "name": "TeraWulf/Fluidstack JV - Flash Compute LLC",
         "parent": "TeraWulf",
         "locations": ["Abernathy, Texas"],
+        "coupon_maturity": "7.25% Sec. Notes due 12/31/30",
+        "tenant": "Fluidstack (Google guarantee)",
+        "lease": "Modified Gross, 15yr/25yr w/ options",
     },
     "YNDRDC": {
         "name": "Yondr Group - Yondr JK 1, LLC",
         "parent": "Yondr Group",
         "locations": ["Loudoun County, Virginia"],
+        "coupon_maturity": "6.875% Sec. Notes due 06/30/31",
+        "tenant": "Oracle",
+        "lease": "Modified Gross, 15yr/25yr w/ options",
     },
     # No bond ticker known yet — "ZENARC" is a placeholder key I made up
     # so this fits the existing dict structure. Swap it for the real
@@ -146,6 +200,9 @@ BONDS = {
         "name": "Zenith Arc LLC",
         "parent": "Zenith Arc",
         "locations": ["Okmulgee, Oklahoma"],
+        "coupon_maturity": "unknown — no offering details yet",
+        "tenant": "unconfirmed",
+        "lease": "unknown",
     },
 }
 
@@ -613,26 +670,31 @@ ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 
 _RELEVANCE_SYSTEM_PROMPT = """You are a high-yield credit analyst screening news for a datacenter bond monitoring system.
 
-You will be given a bond/issuer group (ticker(s), issuer name, site location) and a list of candidate news articles that matched a keyword search. The keyword search is deliberately broad and produces a lot of noise — coincidental keyword overlaps, generic legal-explainer content, unrelated companies, routine local news with no real connection to this issuer or site, and derivative commentary that isn't actual new reporting.
+You will be given a bond/issuer group (ticker(s) with coupon/maturity, tenant, and lease structure; issuer name; site location; whether this is a LOCAL/SITE-level search or a CORPORATE-level search) and a list of candidate news articles that matched a keyword search. The keyword search is deliberately broad and produces a lot of noise — coincidental keyword overlaps, generic legal-explainer content, unrelated companies, routine local news with no real connection to this issuer or site, and derivative commentary that isn't actual new reporting.
 
 For EACH article, decide:
 1. Is it actually about this specific issuer, its tenant, or this specific site/location — not just a coincidental keyword match?
-2. Is it plausibly market-moving or credit-relevant for this bond? Examples of relevant news: financing/refinancing, litigation involving this issuer or its tenant, permitting/zoning votes or reversals, utility/interconnection disputes or delays, tenant lease changes or defaults, ratings actions, project delays/cancellations, material opposition organizing that could affect timeline, regulatory action specific to this project.
+2. Is it plausibly market-moving or credit-relevant for this bond?
 3. Is it primary, incremental reporting — an actual new fact or development — rather than derivative commentary or a rehash? Reject anything whose content is fundamentally reactive/secondary rather than a new underlying fact.
 
-Mark NOT relevant:
+On weighting LOCAL vs. CORPORATE news (criterion 2): this system exists specifically because for site-specific HY project-finance datacenter debt, LOCAL/SITE-level news — permitting and zoning votes or reversals, county/planning commission decisions, utility and interconnection disputes or delays, tax abatement votes, litigation tied to the specific site, water/power use disputes, organized local opposition that could affect timeline — is very often the single most important, earliest credit signal, even when it doesn't resemble traditional "market-moving" corporate news. When the search context is LOCAL/SITE-level, apply a MODERATE bar: genuine, confirmed site-specific governmental/regulatory/utility/litigation developments should be marked relevant even if their scale seems modest, because early local signals on permitting or utility disputes are exactly what this feed is for. When the search context is CORPORATE-level, apply a HIGHER bar: require a clear, specific tie to this bond's actual economics (the tenant's ability to pay under the lease, the issuer's financing, ratings, litigation) — general company profiles, valuation milestones, or PR without a specific credit-relevant mechanism should usually be marked not relevant unless the connection to this bond's cash flows or collateral is direct and explained.
+
+Mark NOT relevant regardless of context:
 - Generic explainer/legal-blog content not about this issuer
 - Unrelated companies/entities that happen to share a keyword
 - Routine local news (sports, weather, general community events) with no substantive connection to this bond
 - Stock technical-analysis or price-action commentary ("why X stock moved today", chart/momentum/analyst-rating pieces, "3 stocks to watch" listicles) — these react to price action, they are not news about the issuer itself
 - Opinion, recap, or "explainer" pieces that just restate or synthesize previously reported facts without any new development
 - Aggregator/wire rehashes of a story with no new information beyond what a prior article already covered
+- Valuation milestones, funding-round announcements, or general "milestone reached" PR about a tenant/parent that state a headline number (e.g. "Company X hits $18B valuation") WITHOUT a specific, stated mechanism connecting it to this bond's cash flows, collateral, or counterparty risk. A valuation figure alone does not tell you whether lease terms, tenant ability-to-pay, or site-level risk changed — it would not itself move trading in this bond. Only mark such items relevant if the article explicitly ties the raise/valuation to something mechanistic for this specific lease or site (e.g. stated use-of-proceeds funding this site's buildout, a covenant change, a stated liquidity commitment to this project).
 - Anything you're not reasonably confident is actually about this specific issuer/site
 
 When in doubt between "interesting but tangential" and "not relevant," or between "primary news" and "derivative commentary," mark it not relevant — this feed should be selective and only surface genuinely new, primary developments, not comprehensive coverage of everything mentioning these names.
 
+For each relevant article, the analysis must be specific to the bond(s) given — cite the actual ticker(s), and where it strengthens the point, the coupon/maturity, tenant, or lease structure provided (e.g. "credit positive for the 6.25% MERIDI notes due 4/30/31, where Fluidstack sits under a Google-guaranteed triple-net lease — reduced counterparty risk on the lease servicing the notes"). Do not write generically about "the parent company" when specific bond terms are available and relevant — reference the actual bond.
+
 Respond with ONLY a JSON array, no other text, no markdown code fences, one object per article in the same order given:
-[{"index": 0, "relevant": true, "analysis": "1-2 sentence bond-specific impact"}, {"index": 1, "relevant": false, "analysis": ""}]"""
+[{"index": 0, "relevant": true, "analysis": "1-2 sentence bond-specific impact citing the ticker and relevant bond terms"}, {"index": 1, "relevant": false, "analysis": ""}]"""
 
 
 def _call_claude(system_prompt, user_prompt, max_tokens=2000):
@@ -667,10 +729,26 @@ def _parse_json_array(raw):
     return json.loads(raw.strip())
 
 
-def assess_relevance(group_label, tickers, entries):
+def _bond_detail_lines(tickers):
+    lines = []
+    for t in tickers:
+        info = BONDS.get(t)
+        if not info:
+            lines.append(f"- {t}: (no bond detail on file)")
+            continue
+        lines.append(
+            f"- {t}: {info.get('coupon_maturity', 'n/a')} | "
+            f"Tenant: {info.get('tenant', 'n/a')} | Lease: {info.get('lease', 'n/a')}"
+        )
+    return "\n".join(lines)
+
+
+def assess_relevance(group_label, tickers, entries, context_type):
     """Filters a batch of keyword-matched candidates down to genuinely
     relevant, bond-specific, market-moving items, each paired with a short
-    impact analysis. Returns a list of (entry, analysis) tuples.
+    impact analysis. context_type is "corporate" or "local" — it changes
+    how strictly the relevance bar is applied (see system prompt). Returns
+    a list of (entry, analysis) tuples.
 
     Fails open (keeps all candidates, unanalyzed) if the API call or
     response parsing fails, rather than silently dropping everything —
@@ -685,8 +763,9 @@ def assess_relevance(group_label, tickers, entries):
         article_lines.append(f"{i}. TITLE: {title}\n   SUMMARY: {summary}")
 
     user_prompt = (
+        f"Search context: {context_type.upper()}\n"
         f"Bond group: {group_label}\n"
-        f"Ticker(s): {', '.join(tickers)}\n\n"
+        f"Bond detail:\n{_bond_detail_lines(tickers)}\n\n"
         f"Candidate articles:\n" + "\n".join(article_lines)
     )
 
@@ -757,7 +836,7 @@ def main():
     for parent in list(new_corporate.keys()):
         entries = new_corporate[parent]
         print(f"  assessing corporate: {parent} ({len(entries)} candidate(s))")
-        kept = assess_relevance(parent, PARENT_GROUPS[parent], entries)
+        kept = assess_relevance(parent, PARENT_GROUPS[parent], entries, context_type="corporate")
         if kept:
             new_corporate[parent] = kept
         else:
@@ -766,7 +845,7 @@ def main():
     for location in list(new_local.keys()):
         entries = new_local[location]
         print(f"  assessing local: {location} ({len(entries)} candidate(s))")
-        kept = assess_relevance(location, LOCATION_GROUPS[location], entries)
+        kept = assess_relevance(location, LOCATION_GROUPS[location], entries, context_type="local")
         if kept:
             new_local[location] = kept
         else:

@@ -475,6 +475,46 @@ def _is_recent_enough(entry, max_age_days=MAX_ARTICLE_AGE_DAYS):
     return age_days <= max_age_days
 
 
+# Outlets that are structurally secondary/derivative — contributor-driven
+# stock commentary, technical analysis, and content-mill sites rather than
+# primary reporting. Blocked outright regardless of what an individual
+# article says, since relying on the LLM to catch every instance of "this
+# entire publication is opinion/analysis, not news" isn't reliable. Matched
+# against the article's source name, NOT its link domain — Google News RSS
+# wraps links through news.google.com, so the true publisher domain often
+# isn't recoverable from the link itself; the source name (or the
+# " - Source Name" suffix Google appends to titles) is the reliable signal.
+BLOCKED_SOURCES = {
+    "seeking alpha",
+    "motley fool", "the motley fool",
+    "zacks", "zacks investment research",
+    "benzinga",
+    "investorplace",
+    "marketbeat",
+    "simply wall st", "simplywall.st",
+    "gurufocus",
+    "insider monkey",
+    "tipranks",
+    "barchart",
+    "24/7 wall st", "247wallst",
+}
+
+
+def _entry_source_name(entry):
+    source = entry.get("source")
+    if isinstance(source, dict) and source.get("title"):
+        return source["title"].strip()
+    title = entry.get("title", "")
+    if " - " in title:
+        return title.rsplit(" - ", 1)[-1].strip()
+    return ""
+
+
+def _is_blocked_source(entry):
+    name = _entry_source_name(entry).lower()
+    return any(blocked in name for blocked in BLOCKED_SOURCES)
+
+
 # ---------------------------------------------------------------------------
 # News fetching
 # ---------------------------------------------------------------------------
@@ -650,6 +690,9 @@ def _is_similar_to_any(norm_title, seen_titles, threshold=TITLE_SIMILARITY_THRES
 def _dedupe_fresh(entries, seen, seen_titles, tag):
     fresh = []
     for entry in entries:
+        if _is_blocked_source(entry):
+            print(f"    [blocked source] {entry.get('title', 'Untitled')} — {_entry_source_name(entry)}")
+            continue
         if not _is_recent_enough(entry):
             continue
         key = article_key(entry)
@@ -687,9 +730,9 @@ You will be given a bond/issuer group (ticker(s) with coupon/maturity, tenant, a
 
 This feed generates two outputs from the same assessment: a STRICT digest (only genuinely material, primary, on-topic news) and a BROADER review digest (anything on-topic at all, for manual QC of whether the strict filter is too aggressive). To support both, score each article on three SEPARATE, independent criteria rather than one combined yes/no:
 
-1. "on_topic": Is this article actually about this specific issuer, its tenant, or this specific site/location — not just a coincidental keyword match, not an unrelated company, not generic content (legal explainers, routine local news like sports/weather with no substantive tie)? This is the only bar for "is this worth a human's attention to review at all."
+1. "on_topic": Is this article actually about this specific issuer, its tenant, or this specific site/location — not just a coincidental keyword match, not an unrelated company, not generic content (legal explainers, routine local news like sports/weather with no substantive tie)? A sector- or industry-trend piece that discusses a tenant/company as one example within a broader narrative about an entire category of companies (e.g. "neoclouds are getting bigger and riskier," "the AI datacenter boom faces headwinds") is NOT on_topic even if it names the tenant — it's commentary about a trend, not about this specific issuer's situation, unless it reports a fact specific to this issuer distinguishable from the general narrative. This is the only bar for "is this worth a human's attention to review at all."
 2. "market_moving": Is it plausibly market-moving or credit-relevant for this bond? On weighting LOCAL vs. CORPORATE: LOCAL/SITE-level news (permitting/zoning votes or reversals, county/planning commission decisions, utility/interconnection disputes or delays, tax abatement votes, litigation tied to the specific site, water/power use disputes, organized local opposition affecting timeline) is very often the single most important, earliest credit signal for this kind of debt — apply a MODERATE bar here: genuine, confirmed site-specific developments count even if modest in scale. For CORPORATE-level news, apply a HIGHER bar: require a clear, specific, stated mechanism tying it to this bond's actual economics (tenant ability-to-pay, issuer financing, ratings, litigation, use-of-proceeds affecting this site). Valuation milestones, funding-round announcements, or "milestone reached" PR that state a headline number WITHOUT a specific stated mechanism connecting it to this bond's cash flows, collateral, or counterparty risk should be market_moving=false — a valuation figure alone doesn't tell you if lease terms or ability-to-pay changed.
-3. "primary_incremental": Is this primary, incremental reporting — an actual new fact or development — rather than derivative commentary or a rehash? Mark false for: stock technical-analysis/price-action commentary ("why X stock moved today", chart/momentum pieces, "stocks to watch" listicles), opinion/recap/"explainer" pieces restating previously reported facts, aggregator/wire rehashes with no new information beyond a prior article.
+3. "primary_incremental": Is this primary, incremental reporting — an actual new fact or development — rather than derivative commentary or a rehash? Mark false for: stock technical-analysis/price-action commentary ("why X stock moved today", chart/momentum pieces, "stocks to watch" listicles), opinion/recap/"explainer" pieces restating previously reported facts, aggregator/wire rehashes with no new information beyond a prior article, sector-wide opinion/analysis pieces (op-eds, "state of the industry" pieces) that use a tenant as an illustrative example rather than reporting a new fact about that specific issuer, and sell-side analyst rating/price-target actions ("X maintains Buy rating, raises price target to $Y", coverage initiations, rating changes) — these reflect one analyst's valuation opinion, not a new fact about the issuer's operations, financing, or credit profile, regardless of which outlet reports it.
 
 Be reasonably generous on "on_topic" (that's the low bar for the review digest) but strict and precise on "market_moving" and "primary_incremental" (those gate the main alert). When genuinely uncertain on "on_topic," lean inclusive; when uncertain on the other two, lean toward false.
 

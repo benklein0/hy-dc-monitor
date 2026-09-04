@@ -182,6 +182,17 @@ Three layers of search, all feeding into a "Local / Site News" section:
    which would otherwise risk manufacturing a false disagreement (or
    false agreement) against Claude's real assessment.
 
+   OpenAI's GPT-5 family (and the older o1/o3 reasoning models) reject
+   the legacy `max_tokens` parameter outright with a `400 Bad Request`
+   and require `max_completion_tokens` instead; Grok still accepts
+   `max_tokens`. `_call_grok`/`_call_gpt` each pass the correct one for
+   their provider. If `OPENAI_MODEL` is ever changed to a different
+   model family, double-check which parameter it expects. Error messages
+   from either provider now include the actual response body (not just
+   the bare HTTP status), since that's usually where the real cause is
+   named explicitly — this specific bug was only diagnosable by reading
+   OpenAI's error text ("Unsupported parameter: 'max_tokens'...").
+
 All four layers use Google News RSS or direct outlet RSS (free, no API
 key). Every article's link is hashed and checked against a persisted
 `seen_articles.json` state file, so re-runs only alert on genuinely new

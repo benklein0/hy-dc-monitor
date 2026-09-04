@@ -946,11 +946,18 @@ def _call_claude(system_prompt, user_prompt, max_tokens=2000):
     )
 
 
-def _call_openai_compatible(provider, api_url, api_key, model, system_prompt, user_prompt, max_tokens=2000):
+def _call_openai_compatible(provider, api_url, api_key, model, system_prompt, user_prompt,
+                             max_tokens=2000, token_param_name="max_tokens"):
     """xAI's Grok API is documented as OpenAI-SDK-compatible, so both Grok
     and actual OpenAI models are called through the same chat-completions
     request/response shape. provider is "xai" or "openai" — used only to
     file usage under the right cost bucket.
+
+    token_param_name matters: OpenAI's GPT-5 family (and the older o1/o3
+    reasoning models) reject the legacy "max_tokens" parameter outright
+    with a 400 Bad Request and require "max_completion_tokens" instead;
+    Grok still accepts "max_tokens". Each caller (_call_grok / _call_gpt)
+    passes the right one for its provider.
 
     Retries once after a short pause on a 429 (rate limit / quota), since
     a single transient rate-limit hit shouldn't immediately fail open —
@@ -968,7 +975,7 @@ def _call_openai_compatible(provider, api_url, api_key, model, system_prompt, us
             },
             json={
                 "model": model,
-                "max_tokens": max_tokens,
+                token_param_name: max_tokens,
                 "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
@@ -983,7 +990,10 @@ def _call_openai_compatible(provider, api_url, api_key, model, system_prompt, us
         try:
             resp.raise_for_status()
         except Exception as e:
-            last_exc = e
+            # Include the response body — it usually names the exact
+            # problem (e.g. "Unsupported parameter: 'max_tokens'...")
+            # far more precisely than the bare status-line exception does.
+            last_exc = RuntimeError(f"{e} — response body: {resp.text[:500]}")
             break
         data = resp.json()
         usage = data.get("usage", {})
@@ -997,13 +1007,14 @@ def _call_openai_compatible(provider, api_url, api_key, model, system_prompt, us
     raise last_exc if last_exc else RuntimeError(f"{provider} request failed after retry")
 
 
-
 def _call_grok(system_prompt, user_prompt, max_tokens=2000):
-    return _call_openai_compatible("xai", XAI_API_URL, XAI_API_KEY, XAI_MODEL, system_prompt, user_prompt, max_tokens)
+    return _call_openai_compatible("xai", XAI_API_URL, XAI_API_KEY, XAI_MODEL, system_prompt, user_prompt,
+                                    max_tokens, token_param_name="max_tokens")
 
 
 def _call_gpt(system_prompt, user_prompt, max_tokens=2000):
-    return _call_openai_compatible("openai", OPENAI_API_URL, OPENAI_API_KEY, OPENAI_MODEL, system_prompt, user_prompt, max_tokens)
+    return _call_openai_compatible("openai", OPENAI_API_URL, OPENAI_API_KEY, OPENAI_MODEL, system_prompt, user_prompt,
+                                    max_tokens, token_param_name="max_completion_tokens")
 
 
 def _parse_json_array(raw):

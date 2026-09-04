@@ -372,6 +372,14 @@ EMAIL_FROM = "".join(os.environ["EMAIL_FROM"].split())
 ANTHROPIC_API_KEY = "".join(os.environ["ANTHROPIC_API_KEY"].split())
 ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001").strip()
 
+# Optional — enables the cross-model disagreement report (see
+# cross_model_disagreement_report below). If either is unset, that
+# provider is simply skipped; the core pipeline is unaffected either way.
+XAI_API_KEY = "".join(os.environ.get("XAI_API_KEY", "").split())
+XAI_MODEL = os.environ.get("XAI_MODEL", "grok-4-1-fast").strip()
+OPENAI_API_KEY = "".join(os.environ.get("OPENAI_API_KEY", "").split())
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5-mini").strip()
+
 
 def _check_ascii(name, value):
     try:
@@ -388,6 +396,10 @@ def _check_ascii(name, value):
 _check_ascii("RESEND_API_KEY", RESEND_API_KEY)
 _check_ascii("EMAIL_FROM", EMAIL_FROM)
 _check_ascii("ANTHROPIC_API_KEY", ANTHROPIC_API_KEY)
+if XAI_API_KEY:
+    _check_ascii("XAI_API_KEY", XAI_API_KEY)
+if OPENAI_API_KEY:
+    _check_ascii("OPENAI_API_KEY", OPENAI_API_KEY)
 
 # Comma-separated list of recipients, e.g. "a@example.com,b@example.com"
 ALERT_EMAIL_TO = [
@@ -395,6 +407,7 @@ ALERT_EMAIL_TO = [
     for addr in os.environ.get("ALERT_EMAIL_TO", EMAIL_FROM).split(",")
     if addr.strip()
 ]
+
 
 # Recipients for the broader QC/review digest (on-topic items excluded from
 # the strict alert, for tuning filter accuracy). Defaults to just the first
@@ -405,6 +418,16 @@ ALERT_EMAIL_TO = [
 REVIEW_EMAIL_TO = [
     addr.strip()
     for addr in os.environ.get("REVIEW_EMAIL_TO", ALERT_EMAIL_TO[0]).split(",")
+    if addr.strip()
+]
+
+# Recipients for the cross-model disagreement report (see
+# cross_model_disagreement_report). Defaults to REVIEW_EMAIL_TO. Only sent
+# when at least one of XAI_API_KEY / OPENAI_API_KEY is configured AND at
+# least one actual disagreement occurred — not sent every run.
+CROSS_MODEL_REPORT_EMAIL_TO = [
+    addr.strip()
+    for addr in os.environ.get("CROSS_MODEL_REPORT_EMAIL_TO", ",".join(REVIEW_EMAIL_TO)).split(",")
     if addr.strip()
 ]
 
@@ -726,6 +749,48 @@ def build_email(new_corporate, new_local, subject_prefix="HY Datacenter News Ale
     return {"subject": subject, "html": html, "text": text}
 
 
+def build_disagreement_email(records):
+    """Builds the cross-model disagreement report — a flat list of
+    articles where Grok and/or GPT's strict_relevant call differed from
+    Claude's, each showing every model's verdict and reasoning side by
+    side. Purely diagnostic; never sent unless there's at least one
+    actual disagreement."""
+    subject = f"HY Datacenter News — Cross-Model Disagreement Report — {len(records)} item{'s' if len(records) != 1 else ''}"
+
+    html_parts = [
+        "<p>Articles where Grok and/or GPT's relevance call differed from Claude's "
+        "(Claude's call is what actually gates the main alert — this is a diagnostic "
+        "comparison, not a second opinion that changes anything automatically):</p>"
+    ]
+    text_parts = ["Articles where another model's relevance call differed from Claude's:"]
+
+    for r in records:
+        title = r["entry"].get("title", "Untitled")
+        link = r["entry"].get("link", "")
+        group = r["group_label"]
+        claude_v = r["claude"]
+
+        html_parts.append(f'<h3><a href="{link}">{title}</a></h3>')
+        html_parts.append(f"<p><em>{group}</em></p><ul>")
+        html_parts.append(
+            f"<li><b>Claude</b> — relevant: {claude_v['strict_relevant']} — {claude_v['analysis']}</li>"
+        )
+        text_parts.append(f"\n{title} ({group})\n  {link}")
+        text_parts.append(f"  Claude — relevant: {claude_v['strict_relevant']} — {claude_v['analysis']}")
+
+        for model_name, v in r["others"].items():
+            html_parts.append(
+                f"<li><b>{model_name}</b> — relevant: {v['strict_relevant']} — {v['analysis']}</li>"
+            )
+            text_parts.append(f"  {model_name} — relevant: {v['strict_relevant']} — {v['analysis']}")
+        html_parts.append("</ul>")
+
+    html = f"<html><body>{''.join(html_parts)}</body></html>"
+    text = "\n".join(text_parts)
+
+    return {"subject": subject, "html": html, "text": text}
+
+
 def send_email(msg, recipients=None):
     resp = requests.post(
         "https://api.resend.com/emails",
@@ -815,6 +880,11 @@ This feed generates two outputs from the same assessment: a STRICT digest (only 
 
 1. "on_topic": Is this article actually about this specific issuer, its tenant, or this specific site/location — not just a coincidental keyword match, not an unrelated company, not generic content (legal explainers, routine local news like sports/weather with no substantive tie)? A sector- or industry-trend piece that discusses a tenant/company as one example within a broader narrative about an entire category of companies (e.g. "neoclouds are getting bigger and riskier," "the AI datacenter boom faces headwinds") is NOT on_topic even if it names the tenant — it's commentary about a trend, not about this specific issuer's situation, unless it reports a fact specific to this issuer distinguishable from the general narrative. This is the only bar for "is this worth a human's attention to review at all."
 2. "market_moving": Is it plausibly market-moving or credit-relevant for this bond? On weighting LOCAL vs. CORPORATE: LOCAL/SITE-level news (permitting/zoning votes or reversals, county/planning commission decisions, utility/interconnection disputes or delays, tax abatement votes, litigation tied to the specific site, water/power use disputes, organized local opposition affecting timeline) is very often the single most important, earliest credit signal for this kind of debt — apply a MODERATE bar here: genuine, confirmed site-specific developments count even if modest in scale. For CORPORATE-level news, apply a HIGHER bar: require a clear, specific, stated mechanism tying it to this bond's actual economics (tenant ability-to-pay, issuer financing, ratings, litigation, use-of-proceeds affecting this site). Valuation milestones, funding-round announcements, or "milestone reached" PR that state a headline number WITHOUT a specific stated mechanism connecting it to this bond's cash flows, collateral, or counterparty risk should be market_moving=false — a valuation figure alone doesn't tell you if lease terms or ability-to-pay changed.
+
+CRITICAL — SITE-MATCHING FOR MULTI-SITE SPONSORS: some corporate parents sponsor multiple separate project-finance bonds secured by DIFFERENT physical sites (e.g. TeraWulf's WULF notes are secured by its Barker, NY site; its FLASHC notes by a different Abernathy, TX site — a news story about a third TeraWulf site, e.g. one in Hancock County, KY, is about neither). Each bond's "Site location(s)" is given in the bond detail above. If a CORPORATE-context article describes a development at a specific site, check whether that site matches the site(s) listed for the ticker(s) in this group:
+- If the site matches (or the article is genuinely company-wide — overall earnings, corporate-level financing, executive changes, litigation against the parent entity itself, credit ratings on the parent) — proceed with the normal market_moving assessment.
+- If the site does NOT match — it's a different, untracked site under the same sponsor — do not treat it as market_moving for this bond's specific collateral. Say so explicitly in the analysis (e.g. "this is TeraWulf's Hancock, KY site, not WULF's Barker, NY or FLASHC's Abernathy, TX sites — no direct collateral impact"), and only mark it relevant if you're treating it purely as weak, general sponsor-level context (which should still generally be market_moving=false unless the scale is large enough to plausibly affect the sponsor's overall ability to support all its project subsidiaries).
+- Note: some tickers (e.g. CORZ) are themselves secured across multiple listed sites — for those, news about any of that ticker's own listed sites is legitimately relevant to that same bond; the mismatch case is specifically about a site that isn't listed for ANY ticker in this group at all.
 3. "primary_incremental": Is this primary, incremental reporting — an actual new fact or development — rather than derivative commentary or a rehash? Mark false for: stock technical-analysis or macro-driven equity price commentary ("why X stock moved today", chart/momentum pieces, "stocks to watch" listicles, or pieces attributing stock price moves — for one name or several named together — to macro conditions like interest rates, Treasury yields, or broad risk sentiment, without reporting a company-specific new fact) — these are equity-market commentary reacting to price action or macro conditions, not primary news about a specific issuer's operations, financing terms, or credit profile, even when they name the specific tickers and cite real numbers; opinion/recap/"explainer" pieces restating previously reported facts; aggregator/wire rehashes with no new information beyond a prior article; sector-wide opinion/analysis pieces (op-eds, "state of the industry" pieces) that use a tenant as an illustrative example rather than reporting a new fact about that specific issuer; and sell-side analyst rating/price-target actions ("X maintains Buy rating, raises price target to $Y", coverage initiations, rating changes) — these reflect one analyst's valuation opinion, not a new fact about the issuer's operations, financing, or credit profile, regardless of which outlet reports it. Also watch for STALE PRIMARY COVERAGE: read the article's own text for internal date cues (e.g. "filed Monday", "announced earlier this week", "in a filing made public on [date]", "shares fell after Tuesday's disclosure") that indicate the underlying event actually happened noticeably earlier than the article's own publish date — this signals catch-up/secondary coverage of an already-disclosed fact, not the disclosure itself, even when the headline reads like breaking news ("Company X files for IPO") and the outlet is legitimate. Mark these primary_incremental=false unless the article itself adds a genuinely new fact beyond the earlier disclosure (updated terms, market reaction data, new figures not in the original disclosure).
 
 Be reasonably generous on "on_topic" (that's the low bar for the review digest) but strict and precise on "market_moving" and "primary_incremental" (those gate the main alert). When genuinely uncertain on "on_topic," lean inclusive; when uncertain on the other two, lean toward false.
@@ -826,16 +896,27 @@ Respond with ONLY a JSON array, no other text, no markdown code fences, one obje
 
 
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
+XAI_API_URL = "https://api.x.ai/v1/chat/completions"
+OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
 
-# Haiku 4.5 pricing as of Sep 2026: $1/M input tokens, $5/M output tokens.
-# https://www.anthropic.com/claude/haiku — check for updates if this drifts.
-_HAIKU_INPUT_COST_PER_MTOK = 1.00
-_HAIKU_OUTPUT_COST_PER_MTOK = 5.00
+# Pricing as of Sep 2026, $/M tokens (input, output). Verify current rates
+# before trusting the cost log over time — these are hardcoded estimates:
+# Anthropic: https://www.anthropic.com/claude/haiku
+# xAI: https://docs.x.ai/developers/models (Grok 4.1 Fast is the cheap tier)
+# OpenAI: https://developers.openai.com/api/docs/pricing (gpt-5-mini)
+_MODEL_PRICING = {
+    "anthropic": (1.00, 5.00),
+    "xai": (0.20, 0.50),
+    "openai": (0.25, 2.00),
+}
 
-# Accumulates actual token usage across all Claude calls in a single run
-# (reset at the top of main()), so we can log a real cost estimate at the
-# end rather than guessing from character counts.
-_usage_totals = {"input_tokens": 0, "output_tokens": 0, "calls": 0}
+# Accumulates actual token usage per provider across a single run (reset
+# at the top of main()), so we can log a real cost estimate at the end
+# rather than guessing from character counts.
+_usage_totals = {
+    provider: {"input_tokens": 0, "output_tokens": 0, "calls": 0}
+    for provider in _MODEL_PRICING
+}
 
 
 def _call_claude(system_prompt, user_prompt, max_tokens=2000):
@@ -857,12 +938,53 @@ def _call_claude(system_prompt, user_prompt, max_tokens=2000):
     resp.raise_for_status()
     data = resp.json()
     usage = data.get("usage", {})
-    _usage_totals["input_tokens"] += usage.get("input_tokens", 0)
-    _usage_totals["output_tokens"] += usage.get("output_tokens", 0)
-    _usage_totals["calls"] += 1
+    _usage_totals["anthropic"]["input_tokens"] += usage.get("input_tokens", 0)
+    _usage_totals["anthropic"]["output_tokens"] += usage.get("output_tokens", 0)
+    _usage_totals["anthropic"]["calls"] += 1
     return "".join(
         block.get("text", "") for block in data.get("content", []) if block.get("type") == "text"
     )
+
+
+def _call_openai_compatible(provider, api_url, api_key, model, system_prompt, user_prompt, max_tokens=2000):
+    """xAI's Grok API is documented as OpenAI-SDK-compatible, so both Grok
+    and actual OpenAI models are called through the same chat-completions
+    request/response shape. provider is "xai" or "openai" — used only to
+    file usage under the right cost bucket."""
+    resp = requests.post(
+        api_url,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": model,
+            "max_tokens": max_tokens,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        },
+        timeout=60,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    usage = data.get("usage", {})
+    _usage_totals[provider]["input_tokens"] += usage.get("prompt_tokens", 0)
+    _usage_totals[provider]["output_tokens"] += usage.get("completion_tokens", 0)
+    _usage_totals[provider]["calls"] += 1
+    choices = data.get("choices", [])
+    if not choices:
+        return ""
+    return choices[0].get("message", {}).get("content", "") or ""
+
+
+def _call_grok(system_prompt, user_prompt, max_tokens=2000):
+    return _call_openai_compatible("xai", XAI_API_URL, XAI_API_KEY, XAI_MODEL, system_prompt, user_prompt, max_tokens)
+
+
+def _call_gpt(system_prompt, user_prompt, max_tokens=2000):
+    return _call_openai_compatible("openai", OPENAI_API_URL, OPENAI_API_KEY, OPENAI_MODEL, system_prompt, user_prompt, max_tokens)
 
 
 def _parse_json_array(raw):
@@ -881,9 +1003,12 @@ def _bond_detail_lines(tickers):
         if not info:
             lines.append(f"- {t}: (no bond detail on file)")
             continue
+        locations = info.get("locations") or []
+        loc_str = "; ".join(locations) if locations else "diffuse/many sites (not a single-site bond)"
         lines.append(
             f"- {t}: {info.get('coupon_maturity', 'n/a')} | "
-            f"Tenant: {info.get('tenant', 'n/a')} | Lease: {info.get('lease', 'n/a')}"
+            f"Tenant: {info.get('tenant', 'n/a')} | Lease: {info.get('lease', 'n/a')} | "
+            f"Site location(s): {loc_str}"
         )
     return "\n".join(lines)
 
@@ -898,49 +1023,34 @@ def _bond_detail_lines(tickers):
 MAX_CANDIDATES_PER_CLAUDE_CALL = 25
 
 
-def assess_relevance(group_label, tickers, entries, context_type, previously_alerted_titles=None):
-    """Assesses every keyword-matched candidate for genuine relevance,
-    bond-specificity, and materiality. context_type is "corporate" or
-    "local" — it changes how strictly the relevance bar is applied (see
-    system prompt). previously_alerted_titles (optional) is a list of
-    headlines already sent in the main alert for this same bond group in
-    the recent past — passed as context so Claude can catch the same
-    underlying story reworded by a different outlet (fuzzy title-matching
-    alone misses this when the wording differs enough, e.g. "SB Energy
-    files for IPO" vs "American data center operator SB Energy is
-    planning an IPO").
+def _assess_relevance_with(call_fn, provider_label, group_label, tickers, entries, context_type, previously_alerted_titles=None):
+    """Provider-agnostic core of the relevance assessment — call_fn is
+    _call_claude, _call_grok, or _call_gpt. Used both by the real gating
+    pipeline (via assess_relevance, always Claude) and by
+    cross_model_disagreement_report (via Grok/GPT, for comparison only).
 
     Returns a list of dicts, one per input entry, in the same order:
     [{"entry": entry, "on_topic": bool, "market_moving": bool,
       "primary_incremental": bool, "strict_relevant": bool,
       "broad_relevant": bool, "analysis": str}, ...]
-    "strict_relevant" (all three criteria true) gates the main alert email.
-    "broad_relevant" (on_topic only) gates the broader QC/review digest.
-    "analysis" is always populated — a bond-specific impact note when
-    strict_relevant, a brief reason noting which criterion failed
-    otherwise — so the full verdict trail can be logged even for
-    rejected articles (useful for auditing quiet runs: was there really
-    no news, or did something get wrongly filtered?).
 
     Splits into multiple calls if there are more than
-    MAX_CANDIDATES_PER_CLAUDE_CALL entries, so an unusually large batch
-    can't overflow a single response and force a fail-open on everything
-    at once.
-
-    Fails open to the review digest only (never the main alert) if a
-    call or its response parsing fails, rather than silently dropping
-    everything — a noisy review digest is recoverable and only reaches
-    you; flooding the shared main alert with unfiltered junk is not."""
+    MAX_CANDIDATES_PER_CLAUDE_CALL entries. Fails open to "review only,
+    not the main alert" on any error — this fail-open behavior applies
+    even to Grok/GPT calls used purely for comparison, so a failed
+    cross-check never accidentally suppresses or promotes anything in
+    the real pipeline (which cross-model results never touch anyway)."""
     if not entries:
         return []
 
     if len(entries) > MAX_CANDIDATES_PER_CLAUDE_CALL:
-        print(f"    [batching] {group_label}: {len(entries)} candidates exceeds "
+        print(f"    [batching] {group_label} ({provider_label}): {len(entries)} candidates exceeds "
               f"{MAX_CANDIDATES_PER_CLAUDE_CALL}, splitting into multiple calls")
         results = []
         for start in range(0, len(entries), MAX_CANDIDATES_PER_CLAUDE_CALL):
             chunk = entries[start:start + MAX_CANDIDATES_PER_CLAUDE_CALL]
-            results.extend(assess_relevance(group_label, tickers, chunk, context_type, previously_alerted_titles))
+            results.extend(_assess_relevance_with(call_fn, provider_label, group_label, tickers, chunk,
+                                                   context_type, previously_alerted_titles))
         return results
 
     article_lines = []
@@ -971,17 +1081,17 @@ def assess_relevance(group_label, tickers, entries, context_type, previously_ale
     )
 
     try:
-        raw = _call_claude(_RELEVANCE_SYSTEM_PROMPT, user_prompt, max_tokens=4096)
+        raw = call_fn(_RELEVANCE_SYSTEM_PROMPT, user_prompt, max_tokens=4096)
         results = _parse_json_array(raw)
     except Exception as e:
-        print(f"[warn] Claude relevance check failed for {group_label}: {e} "
+        print(f"[warn] {provider_label} relevance check failed for {group_label}: {e} "
               f"— routing all {len(entries)} candidate(s) to the review digest only "
               f"(fail-open never goes to the main alert, to avoid a technical failure "
               f"flooding the shared distribution)")
         return [{
             "entry": entry, "on_topic": True, "market_moving": False, "primary_incremental": False,
             "strict_relevant": False, "broad_relevant": True,
-            "analysis": "(unassessed — Claude call failed; routed here for manual review rather than the main alert)",
+            "analysis": f"(unassessed — {provider_label} call failed; routed here for manual review rather than the main alert)",
         } for entry in entries]
 
     by_index = {}
@@ -998,7 +1108,7 @@ def assess_relevance(group_label, tickers, entries, context_type, previously_ale
             verdicts.append({
                 "entry": entry, "on_topic": False, "market_moving": False, "primary_incremental": False,
                 "strict_relevant": False, "broad_relevant": False,
-                "analysis": "(no verdict returned by Claude)",
+                "analysis": f"(no verdict returned by {provider_label})",
             })
         else:
             on_topic = bool(r.get("on_topic"))
@@ -1016,10 +1126,76 @@ def assess_relevance(group_label, tickers, entries, context_type, previously_ale
     return verdicts
 
 
+def assess_relevance(group_label, tickers, entries, context_type, previously_alerted_titles=None):
+    """Assesses every keyword-matched candidate for genuine relevance,
+    bond-specificity, and materiality, using Claude — this is the one
+    that actually gates the main alert and review digest. context_type
+    is "corporate" or "local" — it changes how strictly the relevance
+    bar is applied (see system prompt). previously_alerted_titles
+    (optional) is a list of headlines already sent in the main alert for
+    this same bond group in the recent past — passed as context so
+    Claude can catch the same underlying story reworded by a different
+    outlet (fuzzy title-matching alone misses this when the wording
+    differs enough, e.g. "SB Energy files for IPO" vs "American data
+    center operator SB Energy is planning an IPO").
+
+    See _assess_relevance_with for the return shape and batching/fail-open
+    behavior, which this delegates to."""
+    return _assess_relevance_with(_call_claude, "Claude", group_label, tickers, entries, context_type,
+                                   previously_alerted_titles)
+
+
+def cross_model_disagreement_report(group_label, tickers, entries, context_type, claude_verdicts,
+                                     previously_alerted_titles=None):
+    """Runs the same candidate batch through whichever of Grok/GPT are
+    configured (via XAI_API_KEY / OPENAI_API_KEY), using the identical
+    prompt and schema Claude uses, and returns a list of disagreement
+    records — one per article where at least one other model's
+    strict_relevant call differs from Claude's.
+
+    This is purely a diagnostic/audit feature: it never affects what
+    goes into the main alert or review digest (Claude's judgment remains
+    authoritative for actual filtering). It exists to surface cases
+    worth manually reviewing — if multiple models disagree with Claude
+    on the same article, that's a stronger signal for prompt tuning than
+    Claude's judgment alone.
+
+    Returns [] immediately if neither XAI_API_KEY nor OPENAI_API_KEY is
+    configured, so this is a no-op by default."""
+    if not entries or not (XAI_API_KEY or OPENAI_API_KEY):
+        return []
+
+    other_verdicts = {}
+    if XAI_API_KEY:
+        other_verdicts["Grok"] = _assess_relevance_with(
+            _call_grok, "Grok", group_label, tickers, entries, context_type, previously_alerted_titles)
+    if OPENAI_API_KEY:
+        other_verdicts["GPT"] = _assess_relevance_with(
+            _call_gpt, "GPT", group_label, tickers, entries, context_type, previously_alerted_titles)
+
+    records = []
+    for i, claude_v in enumerate(claude_verdicts):
+        row_disagrees = False
+        other_calls = {}
+        for model_name, verdicts in other_verdicts.items():
+            if i >= len(verdicts):
+                continue
+            other_calls[model_name] = verdicts[i]
+            if verdicts[i]["strict_relevant"] != claude_v["strict_relevant"]:
+                row_disagrees = True
+        if row_disagrees:
+            records.append({
+                "entry": claude_v["entry"],
+                "group_label": group_label,
+                "claude": claude_v,
+                "others": other_calls,
+            })
+    return records
+
+
 def main():
-    _usage_totals["input_tokens"] = 0
-    _usage_totals["output_tokens"] = 0
-    _usage_totals["calls"] = 0
+    for provider in _usage_totals:
+        _usage_totals[provider] = {"input_tokens": 0, "output_tokens": 0, "calls": 0}
 
     print(f"[{datetime.now(timezone.utc).isoformat()}] Starting run: "
           f"{len(PARENT_GROUPS)} corporate + {len(LOCATION_GROUPS)} local queries "
@@ -1076,6 +1252,7 @@ def main():
 
     strict_corporate, strict_local = {}, {}
     broad_corporate, broad_local = {}, {}  # on-topic but excluded from strict — for QC review only
+    disagreement_records = []  # cross-model audit only, never gates the real emails
 
     def _log_split_and_record(verdicts, tag):
         strict_items = []
@@ -1110,6 +1287,8 @@ def main():
             strict_corporate[parent] = strict_items
         if broad_extra_items:
             broad_corporate[parent] = broad_extra_items
+        disagreement_records.extend(cross_model_disagreement_report(
+            parent, PARENT_GROUPS[parent], entries, "corporate", verdicts, previously_alerted_titles=prior_titles))
 
     for location in list(new_local.keys()):
         entries = new_local[location]
@@ -1122,6 +1301,8 @@ def main():
             strict_local[location] = strict_items
         if broad_extra_items:
             broad_local[location] = broad_extra_items
+        disagreement_records.extend(cross_model_disagreement_report(
+            location, LOCATION_GROUPS[location], entries, "local", verdicts, previously_alerted_titles=prior_titles))
 
     save_seen(seen)
 
@@ -1145,14 +1326,26 @@ def main():
     else:
         print(f"[{datetime.now(timezone.utc).isoformat()}] No excluded-but-on-topic items for the review digest this run.")
 
-    input_tok = _usage_totals["input_tokens"]
-    output_tok = _usage_totals["output_tokens"]
-    calls = _usage_totals["calls"]
-    est_cost = (input_tok / 1_000_000 * _HAIKU_INPUT_COST_PER_MTOK) + (output_tok / 1_000_000 * _HAIKU_OUTPUT_COST_PER_MTOK)
-    print(f"[{datetime.now(timezone.utc).isoformat()}] Claude usage this run: {calls} call(s), "
-          f"{input_tok:,} input tok + {output_tok:,} output tok "
-          f"≈ ${est_cost:.5f} (at ${_HAIKU_INPUT_COST_PER_MTOK}/M in, ${_HAIKU_OUTPUT_COST_PER_MTOK}/M out — "
-          f"check current pricing at anthropic.com/claude/haiku if this seems stale).")
+    if disagreement_records:
+        disagreement_msg = build_disagreement_email(disagreement_records)
+        send_email(disagreement_msg, recipients=CROSS_MODEL_REPORT_EMAIL_TO)
+        print(f"[{datetime.now(timezone.utc).isoformat()}] Sent cross-model disagreement report with "
+              f"{len(disagreement_records)} item(s) to {CROSS_MODEL_REPORT_EMAIL_TO}.")
+    elif XAI_API_KEY or OPENAI_API_KEY:
+        print(f"[{datetime.now(timezone.utc).isoformat()}] No cross-model disagreements this run.")
+
+    total_cost = 0.0
+    for provider, totals in _usage_totals.items():
+        if totals["calls"] == 0:
+            continue
+        in_rate, out_rate = _MODEL_PRICING[provider]
+        cost = (totals["input_tokens"] / 1_000_000 * in_rate) + (totals["output_tokens"] / 1_000_000 * out_rate)
+        total_cost += cost
+        print(f"[{datetime.now(timezone.utc).isoformat()}] {provider} usage this run: {totals['calls']} call(s), "
+              f"{totals['input_tokens']:,} input tok + {totals['output_tokens']:,} output tok "
+              f"≈ ${cost:.5f} (at ${in_rate}/M in, ${out_rate}/M out — verify current pricing periodically).")
+    if sum(t["calls"] for t in _usage_totals.values()) > 1:
+        print(f"[{datetime.now(timezone.utc).isoformat()}] Total LLM cost this run across all providers: ≈ ${total_cost:.5f}")
 
 
 if __name__ == "__main__":

@@ -115,7 +115,19 @@ Three layers of search, all feeding into a "Local / Site News" section:
      often the earliest and most important signal for this kind of debt.
      Corporate-level news (financing, valuation milestones, general PR)
      is held to a higher bar — it needs a stated mechanism tying it to
-     this bond's actual economics, not just a headline number.
+     this bond's actual economics, not just a headline number. **This
+     check also verifies the article is actually about the right
+     physical site**: some sponsors (TeraWulf, Applied Digital, Cipher
+     Mining) run multiple separate project-finance bonds secured by
+     different sites, and a corporate-level news search can surface a
+     story about an untracked sibling site under the same parent — e.g.
+     a "TeraWulf" search once returned a story about a Hancock County,
+     KY project, which is neither WULF's Barker, NY site nor FLASHC's
+     Abernathy, TX site. Each ticker's actual site location (from
+     `BONDS`) is included in the prompt precisely so Claude can catch
+     this and mark it not market-moving for that specific bond's
+     collateral, rather than assuming any news about the parent company
+     applies to every bond it sponsors.
    - `primary_incremental` — is this original reporting of a new fact,
      not derivative commentary (stock technical-analysis, "why X stock
      moved today" pieces) or a rehash/recap of already-reported facts?
@@ -139,22 +151,35 @@ Three layers of search, all feeding into a "Local / Site News" section:
    have been rejected?
 
    If the Claude call fails for any reason, that group's candidates are
-   kept unfiltered in the main alert (fails open, logged as a warning)
-   rather than silently dropping the whole run's alerts.
+   routed to the review digest only — never the main alert — logged as a
+   warning rather than silently dropping the whole run's alerts (see the
+   fail-open note further down for why the main alert specifically is
+   protected from this).
+
+7. **Cross-model disagreement report (optional)** — a diagnostic-only
+   feature, off by default. If `XAI_API_KEY` and/or `OPENAI_API_KEY` are
+   set, every candidate batch that Claude assesses is also sent to Grok
+   and/or GPT using the identical prompt and schema
+   (`cross_model_disagreement_report`). Wherever another model's
+   `strict_relevant` call differs from Claude's, it shows up in a third
+   email — recipients set via `CROSS_MODEL_REPORT_EMAIL_TO` (defaults to
+   `REVIEW_EMAIL_TO`) — only sent when there's at least one actual
+   disagreement. This never changes what goes into the main alert or
+   review digest; Claude's judgment remains the one that actually gates
+   anything. It exists purely to surface cases where multiple models
+   disagree with Claude's call, which is a stronger tuning signal than
+   Claude's judgment reviewed alone. Leave both keys unset to skip this
+   entirely — nothing else about the pipeline changes.
 
 All four layers use Google News RSS or direct outlet RSS (free, no API
 key). Every article's link is hashed and checked against a persisted
 `seen_articles.json` state file, so re-runs only alert on genuinely new
 stories. Old entries are trimmed after 14 days. Emails a single digest per
-run, split into "Corporate News" and "Local / Site News" sections, via
-the Resend API — only sent if there's something new.
+type per run, split into "Corporate News" and "Local / Site News" sections
+within the main and review emails, via the Resend API — only sent if
+there's something new for that email type.
 
 **Quality controls:**
-- **Hard 2-week age cutoff** — no article older than 14 days can appear in
-  an alert, regardless of source. Google News's `when:1d` filter is
-  best-effort, not a guarantee, and the site-specific/curated-feed layers
-  have no date filtering of their own, so this is enforced directly on
-  each entry's published date.
 - **Anchor-term requirement** — site-specific and curated-feed matches
   require a data-center/energy anchor term (`data center`, `datacenter`,
   `compute`, `hyperscale`, plus the local keyword list) to co-occur with
@@ -304,6 +329,14 @@ Service → **Variables**:
   each API call only fires for groups that actually have new candidate
   articles (typically a handful per run, often zero), using Haiku (the
   cheapest current model).
+- `XAI_API_KEY` (optional) — from https://console.x.ai. Enables the
+  cross-model disagreement report (see below). Omit entirely to skip
+  this feature; nothing else changes if it's unset.
+- `OPENAI_API_KEY` (optional) — from https://platform.openai.com. Same
+  purpose as `XAI_API_KEY`, for GPT instead of Grok. Either, both, or
+  neither can be set independently.
+- `CROSS_MODEL_REPORT_EMAIL_TO` (optional) — recipient(s) for the
+  disagreement report. Defaults to `REVIEW_EMAIL_TO` if unset.
 - `SEEN_FILE_PATH` = `/data/seen_articles.json`
 
 ## 5. Attach a Volume (important — persists dedupe state)

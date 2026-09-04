@@ -950,33 +950,52 @@ def _call_openai_compatible(provider, api_url, api_key, model, system_prompt, us
     """xAI's Grok API is documented as OpenAI-SDK-compatible, so both Grok
     and actual OpenAI models are called through the same chat-completions
     request/response shape. provider is "xai" or "openai" — used only to
-    file usage under the right cost bucket."""
-    resp = requests.post(
-        api_url,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "model": model,
-            "max_tokens": max_tokens,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-        },
-        timeout=60,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    usage = data.get("usage", {})
-    _usage_totals[provider]["input_tokens"] += usage.get("prompt_tokens", 0)
-    _usage_totals[provider]["output_tokens"] += usage.get("completion_tokens", 0)
-    _usage_totals[provider]["calls"] += 1
-    choices = data.get("choices", [])
-    if not choices:
-        return ""
-    return choices[0].get("message", {}).get("content", "") or ""
+    file usage under the right cost bucket.
+
+    Retries once after a short pause on a 429 (rate limit / quota), since
+    a single transient rate-limit hit shouldn't immediately fail open —
+    this is common on newly-created API accounts sitting on a low usage
+    tier, or accounts without a payment method on file (which OpenAI also
+    surfaces as 429). If it fails twice, the caller's normal fail-open
+    handling takes over."""
+    last_exc = None
+    for attempt in range(2):
+        resp = requests.post(
+            api_url,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model,
+                "max_tokens": max_tokens,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            },
+            timeout=60,
+        )
+        if resp.status_code == 429 and attempt == 0:
+            print(f"[warn] {provider} returned 429 (rate limit/quota) — retrying once after 5s")
+            time.sleep(5)
+            continue
+        try:
+            resp.raise_for_status()
+        except Exception as e:
+            last_exc = e
+            break
+        data = resp.json()
+        usage = data.get("usage", {})
+        _usage_totals[provider]["input_tokens"] += usage.get("prompt_tokens", 0)
+        _usage_totals[provider]["output_tokens"] += usage.get("completion_tokens", 0)
+        _usage_totals[provider]["calls"] += 1
+        choices = data.get("choices", [])
+        if not choices:
+            return ""
+        return choices[0].get("message", {}).get("content", "") or ""
+    raise last_exc if last_exc else RuntimeError(f"{provider} request failed after retry")
+
 
 
 def _call_grok(system_prompt, user_prompt, max_tokens=2000):
@@ -1090,7 +1109,7 @@ def _assess_relevance_with(call_fn, provider_label, group_label, tickers, entrie
               f"flooding the shared distribution)")
         return [{
             "entry": entry, "on_topic": True, "market_moving": False, "primary_incremental": False,
-            "strict_relevant": False, "broad_relevant": True,
+            "strict_relevant": False, "broad_relevant": True, "assessment_failed": True,
             "analysis": f"(unassessed — {provider_label} call failed; routed here for manual review rather than the main alert)",
         } for entry in entries]
 
@@ -1107,7 +1126,7 @@ def _assess_relevance_with(call_fn, provider_label, group_label, tickers, entrie
         if r is None:
             verdicts.append({
                 "entry": entry, "on_topic": False, "market_moving": False, "primary_incremental": False,
-                "strict_relevant": False, "broad_relevant": False,
+                "strict_relevant": False, "broad_relevant": False, "assessment_failed": True,
                 "analysis": f"(no verdict returned by {provider_label})",
             })
         else:
@@ -1121,6 +1140,7 @@ def _assess_relevance_with(call_fn, provider_label, group_label, tickers, entrie
                 "primary_incremental": primary_incremental,
                 "strict_relevant": on_topic and market_moving and primary_incremental,
                 "broad_relevant": on_topic,
+                "assessment_failed": False,
                 "analysis": r.get("analysis", ""),
             })
     return verdicts
@@ -1180,8 +1200,15 @@ def cross_model_disagreement_report(group_label, tickers, entries, context_type,
         for model_name, verdicts in other_verdicts.items():
             if i >= len(verdicts):
                 continue
-            other_calls[model_name] = verdicts[i]
-            if verdicts[i]["strict_relevant"] != claude_v["strict_relevant"]:
+            v = verdicts[i]
+            if v.get("assessment_failed"):
+                # The call to this provider failed for this article — we
+                # genuinely don't know its opinion, so it's excluded from
+                # the comparison entirely rather than silently counted as
+                # agreement or disagreement based on a placeholder verdict.
+                continue
+            other_calls[model_name] = v
+            if v["strict_relevant"] != claude_v["strict_relevant"]:
                 row_disagrees = True
         if row_disagrees:
             records.append({

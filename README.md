@@ -171,6 +171,17 @@ Three layers of search, all feeding into a "Local / Site News" section:
    Claude's judgment reviewed alone. Leave both keys unset to skip this
    entirely — nothing else about the pipeline changes.
 
+   Grok/GPT calls retry once after a 5s pause on a `429` (rate limit or
+   quota) before giving up — new API accounts on OpenAI in particular
+   often sit on a very low default rate-limit tier, or return 429 simply
+   because no payment method is on file yet (check
+   platform.openai.com/settings/organization/limits and billing if this
+   keeps happening). If a call still fails after the retry, that
+   provider's opinion is excluded from the comparison for that article
+   entirely — it's never treated as an implicit "not relevant" verdict,
+   which would otherwise risk manufacturing a false disagreement (or
+   false agreement) against Claude's real assessment.
+
 All four layers use Google News RSS or direct outlet RSS (free, no API
 key). Every article's link is hashed and checked against a persisted
 `seen_articles.json` state file, so re-runs only alert on genuinely new

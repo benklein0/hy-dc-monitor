@@ -108,7 +108,16 @@ Three layers of search, all feeding into a "Local / Site News" section:
    group is sent to Claude, which scores each article on three
    *independent* criteria rather than one combined yes/no:
    - `on_topic` — is this actually about this specific issuer/site, not a
-     coincidental keyword overlap or unrelated company?
+     coincidental keyword overlap or unrelated company? This also excludes
+     an article whose real subject is a *different* company/city/state
+     that merely name-checks this issuer's site as a comparison or
+     cautionary example for that other subject's situation — e.g. a
+     Baltimore Sun piece on Maryland's own data-center policy debate that
+     cites Loudoun County, VA as "a warning" was marked on-topic and
+     market-moving for YNDRDC on 2026-09-06 even though nothing was
+     actually reported about the Loudoun site itself. The location has to
+     be where something is happening, not backdrop for someone else's
+     story.
    - `market_moving` — is it plausibly credit-relevant for this bond?
      Local/site-level news (permitting, zoning, utility disputes,
      litigation tied to the site) is held to a moderate bar, since it's
@@ -131,6 +140,20 @@ Three layers of search, all feeding into a "Local / Site News" section:
    - `primary_incremental` — is this original reporting of a new fact,
      not derivative commentary (stock technical-analysis, "why X stock
      moved today" pieces) or a rehash/recap of already-reported facts?
+
+   **Confidence check on all three criteria** — Claude only sees a title
+   and a short summary, not the full article, and real traffic showed it
+   would sometimes construct a plausible-sounding story from a bare
+   headline and mark it relevant "with a caveat" rather than admitting it
+   didn't actually know: e.g. "CoreWeave's Debt Mountain Is Growing Faster
+   Than Its Revenue" (an editorializing financial-blog headline) and "Why
+   data centre opposition could matter more to Anthropic's IPO than
+   copyright lawsuits" (an analytical-framing headline) both reached the
+   main alert with analysis text that hedged ("likely", "plausible
+   indirect signal") rather than citing a stated fact. The prompt now
+   treats hedge words in Claude's *own* draft reasoning as the signal that
+   it's guessing rather than reading a stated fact, and instructs it to
+   flip to `false` in that case instead of keeping a caveated `true`.
 
    **Two emails come out of this**: the main alert requires all three
    criteria (`strict_relevant`), and a second **review digest** requires
@@ -282,6 +305,24 @@ there's something new for that email type.
   domain usually isn't recoverable from the link itself. Add more names
   to the `BLOCKED_SOURCES` set in `monitor.py` as needed; blocked items
   are logged as `[blocked source]` in the Railway deploy logs.
+- **Deterministic junk-headline pre-filter** (`_JUNK_HEADLINE_PATTERNS`) —
+  a handful of headline shapes are structurally non-primary regardless of
+  content: an explicit "Opinion |" / "Op-Ed" / "Analysis:" label, a
+  multi-ticker "Stock Technical Analysis On ..." listicle, a sell-side
+  rating/price-target action, "Why did/is X stock ..." price-action
+  framing, and "Time to Buy, Hold, or Sell?" listicles. The system prompt
+  already tells Claude to treat all of these as decisive signals, but real
+  traffic on 2026-09-07 showed that instruction isn't reliably followed —
+  an article literally titled "Opinion | AI titans' 'circular deals' are
+  starting to look like 'daisy chains'" was scored `primary_incremental:
+  true` and reached the main alert anyway. Rather than depend on prompt-
+  following alone for patterns that are mechanically detectable from the
+  title text, these are now caught before any API call is made (Claude,
+  Grok, and GPT alike) — logged as `[junk headline pattern]` in the
+  Railway deploy logs. Unlike `BLOCKED_SOURCES`, matches aren't dropped
+  silently: since a headline regex is a blunter signal than a full-outlet
+  block, they still land in the review digest (never the main alert) so
+  the pattern list itself stays auditable.
 - **Batch-size protection** (`MAX_CANDIDATES_PER_CLAUDE_CALL`) — an
   unusually large candidate batch (63 articles once got pulled for
   Austin, TX in one run, driven by an unrelated Tesla launch event that

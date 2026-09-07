@@ -589,6 +589,47 @@ def _is_blocked_source(entry):
     return any(blocked in name for blocked in BLOCKED_SOURCES)
 
 
+# Deterministic headline-pattern pre-filter, independent of the LLM call.
+# Added after real-traffic evidence (2026-09-07) that Claude (and, on other
+# articles, Grok/GPT too) intermittently ignores its own system-prompt
+# instructions for these exact patterns — e.g. an article literally titled
+# "Opinion | AI titans' 'circular deals' are starting to look like 'daisy
+# chains'" was scored primary_incremental=true and reached the main alert,
+# despite the EXPLICIT LABELS rule below existing at the time. Rather than
+# trust prompt-following alone for patterns that are mechanically detectable
+# from the headline text, these are caught here before any API call is made.
+#
+# Deliberately NOT treated like BLOCKED_SOURCES (which drops silently): a
+# headline regex is a blunter signal than a full outlet block, so matches
+# still land in the broader review digest (broad_relevant=True) for a human
+# sanity-check on whether the pattern is too aggressive, and never cost an
+# LLM call either way.
+_JUNK_HEADLINE_PATTERNS = [
+    (re.compile(r'^\s*(opinion|op-ed)\b', re.IGNORECASE), "headline labeled Opinion/Op-Ed"),
+    (re.compile(r'^\s*(analysis|commentary)\s*[:|]', re.IGNORECASE), "headline labeled Analysis/Commentary"),
+    (re.compile(r'\btechnical\s+analysis\s+on\b', re.IGNORECASE), "stock technical-analysis listicle"),
+    (re.compile(
+        r'\b(maintains?|reiterates?|initiates?|downgrades?|upgrades?)\b(?:.{0,40}?)'
+        r'\b(buy|sell|hold|overweight|underweight|neutral|outperform)\b(?:.{0,20}?)\brating\b',
+        re.IGNORECASE,
+    ), "sell-side rating action"),
+    (re.compile(r'\bprice\s+target\s+(raised|cut|lowered|increased|hiked)\b', re.IGNORECASE),
+     "sell-side price-target action"),
+    (re.compile(r'^\s*why\s+(did|is|are|could|would|should)\b.{0,80}?\b(stock|shares?)\b', re.IGNORECASE),
+     '"why did/is ... stock" price-action framing'),
+    (re.compile(r'\bbuy,?\s+hold\b', re.IGNORECASE), '"buy, hold, or sell/bail" valuation listicle'),
+]
+
+
+def _junk_headline_reason(title):
+    """Returns a short human-readable reason string if the title matches a
+    known non-primary headline pattern, else None."""
+    for pattern, reason in _JUNK_HEADLINE_PATTERNS:
+        if pattern.search(title or ""):
+            return reason
+    return None
+
+
 # ---------------------------------------------------------------------------
 # News fetching
 # ---------------------------------------------------------------------------
@@ -895,6 +936,8 @@ You will be given a bond/issuer group (ticker(s) with coupon/maturity, tenant, a
 This feed generates two outputs from the same assessment: a STRICT digest (only genuinely material, primary, on-topic news) and a BROADER review digest (anything on-topic at all, for manual QC of whether the strict filter is too aggressive). To support both, score each article on three SEPARATE, independent criteria rather than one combined yes/no:
 
 1. "on_topic": Is this article actually about this specific issuer, its tenant, or this specific site/location — not just a coincidental keyword match, not an unrelated company, not generic content (legal explainers, routine local news like sports/weather with no substantive tie)? A sector- or industry-trend piece that discusses a tenant/company as one example within a broader narrative about an entire category of companies (e.g. "neoclouds are getting bigger and riskier," "the AI datacenter boom faces headwinds," "competition intensifies among AI infrastructure companies," "the battle for AI compute market share heats up") is NOT on_topic even if it names the tenant — it's commentary about a trend or a competitive landscape, not about this specific issuer's situation, unless it reports a fact specific to this issuer distinguishable from the general narrative. Be strict and decisive here, not hedging: if the headline itself frames the story as being about an industry, a competitive dynamic, or a sector trend (rather than a specific event that happened to this issuer), mark on_topic=false outright — do not let it pass on_topic=true and rely on market_moving or primary_incremental to catch it instead, since that's inconsistent with how this same pattern should be judged elsewhere and creates confusing, borderline-looking entries in the review digest for what is actually unambiguous off-topic content. This is the only bar for "is this worth a human's attention to review at all."
+
+REFERENCE/COMPARISON USAGE: also NOT on_topic — an article whose actual subject is a DIFFERENT company, city, or state, which merely cites this issuer's site or history as a comparison, precedent, or cautionary example for that other subject's own situation (e.g. a story about Maryland weighing its own data-center policy that name-checks Loudoun County, Virginia as a warning of what could happen there). The site named in the bond group above has to be where something is actually happening in the article, not scenery for someone else's story. Mark this on_topic=false even though the location name is a genuine, non-coincidental match — the "specific issuer/site" test in the first sentence of this criterion means the article's subject, not just a place it mentions.
 2. "market_moving": Is it plausibly market-moving or credit-relevant for this bond? On weighting LOCAL vs. CORPORATE: LOCAL/SITE-level news (permitting/zoning votes or reversals, county/planning commission decisions, utility/interconnection disputes or delays, tax abatement votes, litigation tied to the specific site, water/power use disputes, organized local opposition affecting timeline) is very often the single most important, earliest credit signal for this kind of debt — apply a MODERATE bar here: genuine, confirmed site-specific developments count even if modest in scale. For CORPORATE-level news, apply a HIGHER bar: require a clear, specific, stated mechanism tying it to this bond's actual economics (tenant ability-to-pay, issuer financing, ratings, litigation, use-of-proceeds affecting this site). Valuation milestones, funding-round announcements, or "milestone reached" PR that state a headline number WITHOUT a specific stated mechanism connecting it to this bond's cash flows, collateral, or counterparty risk should be market_moving=false — a valuation figure alone doesn't tell you if lease terms or ability-to-pay changed.
 
 METRO-WIDE INCIDENTS: a story about a metro-area-wide event (a storm-related power outage affecting thousands of homes, general regional weather disruption) is not automatically market-moving just because the tracked site sits in that metro. Check whether the article confirms the specific site was actually affected (or the tenant's operations were disrupted) — a "5,000 homes without power" story that never mentions the data center itself is weaker evidence than one that does, especially when the site's power source includes backup generators (check the bond detail above) that would blunt a grid-level outage. Don't assume site impact just from geographic proximity; look for an actual stated connection.
@@ -912,6 +955,8 @@ ANALYTICAL FRAMING BEYOND STOCK PRICES: the same skepticism applied to "why did 
 Also watch for STALE PRIMARY COVERAGE: read the article's own text for internal date cues (e.g. "filed Monday", "announced earlier this week", "in a filing made public on [date]", "shares fell after Tuesday's disclosure") that indicate the underlying event actually happened noticeably earlier than the article's own publish date — this signals catch-up/secondary coverage of an already-disclosed fact, not the disclosure itself, even when the headline reads like breaking news ("Company X files for IPO") and the outlet is legitimate. Mark these primary_incremental=false unless the article itself adds a genuinely new fact beyond the earlier disclosure (updated terms, market reaction data, new figures not in the original disclosure).
 
 Be reasonably generous on "on_topic" (that's the low bar for the review digest) but strict and precise on "market_moving" and "primary_incremental" (those gate the main alert). When genuinely uncertain on "on_topic," lean inclusive; when uncertain on the other two, lean toward false.
+
+CONFIDENCE CHECK — A HEDGE IN YOUR OWN REASONING MEANS FALSE, NOT "TRUE, PROBABLY": you only have the title and a short summary, not the full article. If the specific fact you'd need to justify market_moving or primary_incremental isn't actually stated in that title/summary, don't infer that it's probably in there. Watch your own draft analysis for words like "likely", "appears to", "plausibly", "probably", "may", "could be", "if [X] is true", or "requires full text review to confirm" — writing one of those is you noticing, in real time, that you're guessing rather than reading a stated fact. When that happens, the "lean toward false" rule above is not optional: change the verdict to false, don't keep it true with a caveat attached. A verdict of true means the given text itself states the fact plainly enough that you wouldn't need to hedge to defend it.
 
 For each article, always include a brief one-sentence "analysis": if on_topic and market_moving and primary_incremental are all true, a bond-specific impact citing the ticker and relevant bond terms (e.g. "credit positive for the 6.25% MERIDI notes due 4/30/31, where Fluidstack sits under a Google-guaranteed triple-net lease — reduced counterparty risk on the lease servicing the notes"). Otherwise, a brief reason noting which criterion failed and why (e.g. "on-topic but not market-moving: valuation milestone with no stated mechanism", "on-topic but derivative: recap of already-reported facts", "off-topic: unrelated company, coincidental keyword match"). Never leave analysis empty.
 
@@ -1078,10 +1123,51 @@ MAX_CANDIDATES_PER_CLAUDE_CALL = 25
 
 
 def _assess_relevance_with(call_fn, provider_label, group_label, tickers, entries, context_type, previously_alerted_titles=None):
+    """Thin wrapper around _assess_relevance_llm that first splits off any
+    entries matching a _JUNK_HEADLINE_PATTERNS pattern (see definition above)
+    — those get a synthetic verdict without spending an API call, since the
+    pattern itself is already decisive. Everything else goes to the LLM as
+    before. Keeping this split at the very top (rather than folding the
+    check into _assess_relevance_llm) means it happens once per call here,
+    not once per recursive batching chunk, and applies identically no matter
+    which provider (Claude/Grok/GPT) is asking — the pattern is either junk
+    or it isn't, independent of whose judgment we're getting a second
+    opinion from.
+
+    Return shape and ordering match _assess_relevance_llm exactly (one dict
+    per input entry, same order)."""
+    if not entries:
+        return []
+
+    verdicts_by_index = {}
+    remaining = []
+    for i, entry in enumerate(entries):
+        reason = _junk_headline_reason(entry.get("title", ""))
+        if reason:
+            print(f"    [junk headline pattern] {group_label}: {reason} — {entry.get('title', 'Untitled')}")
+            verdicts_by_index[i] = {
+                "entry": entry, "on_topic": True, "market_moving": False, "primary_incremental": False,
+                "strict_relevant": False, "broad_relevant": True, "assessment_failed": False,
+                "analysis": f"(auto-filtered before the {provider_label} call — {reason}; "
+                            f"routed to the review digest for a human sanity-check rather than the main alert)",
+            }
+        else:
+            remaining.append((i, entry))
+
+    if remaining:
+        remaining_entries = [e for _, e in remaining]
+        remaining_verdicts = _assess_relevance_llm(call_fn, provider_label, group_label, tickers, remaining_entries,
+                                                     context_type, previously_alerted_titles)
+        for (orig_i, _), v in zip(remaining, remaining_verdicts):
+            verdicts_by_index[orig_i] = v
+
+    return [verdicts_by_index[i] for i in range(len(entries))]
+
+
+def _assess_relevance_llm(call_fn, provider_label, group_label, tickers, entries, context_type, previously_alerted_titles=None):
     """Provider-agnostic core of the relevance assessment — call_fn is
-    _call_claude, _call_grok, or _call_gpt. Used both by the real gating
-    pipeline (via assess_relevance, always Claude) and by
-    cross_model_disagreement_report (via Grok/GPT, for comparison only).
+    _call_claude, _call_grok, or _call_gpt. Called by _assess_relevance_with
+    above once the junk-headline-pattern entries have already been split off.
 
     Returns a list of dicts, one per input entry, in the same order:
     [{"entry": entry, "on_topic": bool, "market_moving": bool,
@@ -1103,8 +1189,8 @@ def _assess_relevance_with(call_fn, provider_label, group_label, tickers, entrie
         results = []
         for start in range(0, len(entries), MAX_CANDIDATES_PER_CLAUDE_CALL):
             chunk = entries[start:start + MAX_CANDIDATES_PER_CLAUDE_CALL]
-            results.extend(_assess_relevance_with(call_fn, provider_label, group_label, tickers, chunk,
-                                                   context_type, previously_alerted_titles))
+            results.extend(_assess_relevance_llm(call_fn, provider_label, group_label, tickers, chunk,
+                                                  context_type, previously_alerted_titles))
         return results
 
     article_lines = []

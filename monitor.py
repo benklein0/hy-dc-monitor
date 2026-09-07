@@ -753,14 +753,17 @@ def build_disagreement_email(records):
     """Builds the cross-model disagreement report — a flat list of
     articles where Grok and/or GPT's strict_relevant call differed from
     Claude's, each showing every model's verdict and reasoning side by
-    side. Purely diagnostic; never sent unless there's at least one
-    actual disagreement."""
+    side, plus whether the item was actually vetoed out of the main
+    alert (both other models disagreeing with a Claude "relevant" call
+    downgrades it to the review digest — see cross_model_disagreement_report).
+    Never sent unless there's at least one actual disagreement."""
     subject = f"HY Datacenter News — Cross-Model Disagreement Report — {len(records)} item{'s' if len(records) != 1 else ''}"
 
     html_parts = [
-        "<p>Articles where Grok and/or GPT's relevance call differed from Claude's "
-        "(Claude's call is what actually gates the main alert — this is a diagnostic "
-        "comparison, not a second opinion that changes anything automatically):</p>"
+        "<p>Articles where Grok and/or GPT's relevance call differed from Claude's. "
+        "When BOTH other models disagree with a Claude \"relevant\" call, that item is "
+        "automatically downgraded out of the main alert into the review digest instead "
+        "(marked VETOED below) — a single dissenting model never overrides Claude on its own.</p>"
     ]
     text_parts = ["Articles where another model's relevance call differed from Claude's:"]
 
@@ -769,13 +772,15 @@ def build_disagreement_email(records):
         link = r["entry"].get("link", "")
         group = r["group_label"]
         claude_v = r["claude"]
+        vetoed = r.get("vetoed", False)
+        veto_tag = " [VETOED — downgraded to review digest]" if vetoed else ""
 
-        html_parts.append(f'<h3><a href="{link}">{title}</a></h3>')
+        html_parts.append(f'<h3><a href="{link}">{title}</a>{veto_tag}</h3>')
         html_parts.append(f"<p><em>{group}</em></p><ul>")
         html_parts.append(
             f"<li><b>Claude</b> — relevant: {claude_v['strict_relevant']} — {claude_v['analysis']}</li>"
         )
-        text_parts.append(f"\n{title} ({group})\n  {link}")
+        text_parts.append(f"\n{title}{veto_tag} ({group})\n  {link}")
         text_parts.append(f"  Claude — relevant: {claude_v['strict_relevant']} — {claude_v['analysis']}")
 
         for model_name, v in r["others"].items():
@@ -878,14 +883,22 @@ You will be given a bond/issuer group (ticker(s) with coupon/maturity, tenant, a
 
 This feed generates two outputs from the same assessment: a STRICT digest (only genuinely material, primary, on-topic news) and a BROADER review digest (anything on-topic at all, for manual QC of whether the strict filter is too aggressive). To support both, score each article on three SEPARATE, independent criteria rather than one combined yes/no:
 
-1. "on_topic": Is this article actually about this specific issuer, its tenant, or this specific site/location — not just a coincidental keyword match, not an unrelated company, not generic content (legal explainers, routine local news like sports/weather with no substantive tie)? A sector- or industry-trend piece that discusses a tenant/company as one example within a broader narrative about an entire category of companies (e.g. "neoclouds are getting bigger and riskier," "the AI datacenter boom faces headwinds") is NOT on_topic even if it names the tenant — it's commentary about a trend, not about this specific issuer's situation, unless it reports a fact specific to this issuer distinguishable from the general narrative. This is the only bar for "is this worth a human's attention to review at all."
+1. "on_topic": Is this article actually about this specific issuer, its tenant, or this specific site/location — not just a coincidental keyword match, not an unrelated company, not generic content (legal explainers, routine local news like sports/weather with no substantive tie)? A sector- or industry-trend piece that discusses a tenant/company as one example within a broader narrative about an entire category of companies (e.g. "neoclouds are getting bigger and riskier," "the AI datacenter boom faces headwinds," "competition intensifies among AI infrastructure companies," "the battle for AI compute market share heats up") is NOT on_topic even if it names the tenant — it's commentary about a trend or a competitive landscape, not about this specific issuer's situation, unless it reports a fact specific to this issuer distinguishable from the general narrative. Be strict and decisive here, not hedging: if the headline itself frames the story as being about an industry, a competitive dynamic, or a sector trend (rather than a specific event that happened to this issuer), mark on_topic=false outright — do not let it pass on_topic=true and rely on market_moving or primary_incremental to catch it instead, since that's inconsistent with how this same pattern should be judged elsewhere and creates confusing, borderline-looking entries in the review digest for what is actually unambiguous off-topic content. This is the only bar for "is this worth a human's attention to review at all."
 2. "market_moving": Is it plausibly market-moving or credit-relevant for this bond? On weighting LOCAL vs. CORPORATE: LOCAL/SITE-level news (permitting/zoning votes or reversals, county/planning commission decisions, utility/interconnection disputes or delays, tax abatement votes, litigation tied to the specific site, water/power use disputes, organized local opposition affecting timeline) is very often the single most important, earliest credit signal for this kind of debt — apply a MODERATE bar here: genuine, confirmed site-specific developments count even if modest in scale. For CORPORATE-level news, apply a HIGHER bar: require a clear, specific, stated mechanism tying it to this bond's actual economics (tenant ability-to-pay, issuer financing, ratings, litigation, use-of-proceeds affecting this site). Valuation milestones, funding-round announcements, or "milestone reached" PR that state a headline number WITHOUT a specific stated mechanism connecting it to this bond's cash flows, collateral, or counterparty risk should be market_moving=false — a valuation figure alone doesn't tell you if lease terms or ability-to-pay changed.
+
+METRO-WIDE INCIDENTS: a story about a metro-area-wide event (a storm-related power outage affecting thousands of homes, general regional weather disruption) is not automatically market-moving just because the tracked site sits in that metro. Check whether the article confirms the specific site was actually affected (or the tenant's operations were disrupted) — a "5,000 homes without power" story that never mentions the data center itself is weaker evidence than one that does, especially when the site's power source includes backup generators (check the bond detail above) that would blunt a grid-level outage. Don't assume site impact just from geographic proximity; look for an actual stated connection.
 
 CRITICAL — SITE-MATCHING FOR MULTI-SITE SPONSORS: some corporate parents sponsor multiple separate project-finance bonds secured by DIFFERENT physical sites (e.g. TeraWulf's WULF notes are secured by its Barker, NY site; its FLASHC notes by a different Abernathy, TX site — a news story about a third TeraWulf site, e.g. one in Hancock County, KY, is about neither). Each bond's "Site location(s)" is given in the bond detail above. If a CORPORATE-context article describes a development at a specific site, check whether that site matches the site(s) listed for the ticker(s) in this group:
 - If the site matches (or the article is genuinely company-wide — overall earnings, corporate-level financing, executive changes, litigation against the parent entity itself, credit ratings on the parent) — proceed with the normal market_moving assessment.
 - If the site does NOT match — it's a different, untracked site under the same sponsor — do not treat it as market_moving for this bond's specific collateral. Say so explicitly in the analysis (e.g. "this is TeraWulf's Hancock, KY site, not WULF's Barker, NY or FLASHC's Abernathy, TX sites — no direct collateral impact"), and only mark it relevant if you're treating it purely as weak, general sponsor-level context (which should still generally be market_moving=false unless the scale is large enough to plausibly affect the sponsor's overall ability to support all its project subsidiaries).
 - Note: some tickers (e.g. CORZ) are themselves secured across multiple listed sites — for those, news about any of that ticker's own listed sites is legitimately relevant to that same bond; the mismatch case is specifically about a site that isn't listed for ANY ticker in this group at all.
-3. "primary_incremental": Is this primary, incremental reporting — an actual new fact or development — rather than derivative commentary or a rehash? Mark false for: stock technical-analysis or macro-driven equity price commentary ("why X stock moved today", chart/momentum pieces, "stocks to watch" listicles, or pieces attributing stock price moves — for one name or several named together — to macro conditions like interest rates, Treasury yields, or broad risk sentiment, without reporting a company-specific new fact) — these are equity-market commentary reacting to price action or macro conditions, not primary news about a specific issuer's operations, financing terms, or credit profile, even when they name the specific tickers and cite real numbers; opinion/recap/"explainer" pieces restating previously reported facts; aggregator/wire rehashes with no new information beyond a prior article; sector-wide opinion/analysis pieces (op-eds, "state of the industry" pieces) that use a tenant as an illustrative example rather than reporting a new fact about that specific issuer; and sell-side analyst rating/price-target actions ("X maintains Buy rating, raises price target to $Y", coverage initiations, rating changes) — these reflect one analyst's valuation opinion, not a new fact about the issuer's operations, financing, or credit profile, regardless of which outlet reports it. Also watch for STALE PRIMARY COVERAGE: read the article's own text for internal date cues (e.g. "filed Monday", "announced earlier this week", "in a filing made public on [date]", "shares fell after Tuesday's disclosure") that indicate the underlying event actually happened noticeably earlier than the article's own publish date — this signals catch-up/secondary coverage of an already-disclosed fact, not the disclosure itself, even when the headline reads like breaking news ("Company X files for IPO") and the outlet is legitimate. Mark these primary_incremental=false unless the article itself adds a genuinely new fact beyond the earlier disclosure (updated terms, market reaction data, new figures not in the original disclosure).
+3. "primary_incremental": Is this primary, incremental reporting — an actual new fact or development — rather than derivative commentary or a rehash? Mark false for: stock technical-analysis or macro-driven equity price commentary ("why X stock moved today", chart/momentum pieces, "stocks to watch" listicles, or pieces attributing stock price moves — for one name or several named together — to macro conditions like interest rates, Treasury yields, or broad risk sentiment, without reporting a company-specific new fact) — these are equity-market commentary reacting to price action or macro conditions, not primary news about a specific issuer's operations, financing terms, or credit profile, even when they name the specific tickers and cite real numbers; opinion/recap/"explainer" pieces restating previously reported facts; aggregator/wire rehashes with no new information beyond a prior article; sector-wide opinion/analysis pieces (op-eds, "state of the industry" pieces) that use a tenant as an illustrative example rather than reporting a new fact about that specific issuer; and sell-side analyst rating/price-target actions ("X maintains Buy rating, raises price target to $Y", coverage initiations, rating changes) — these reflect one analyst's valuation opinion, not a new fact about the issuer's operations, financing, or credit profile, regardless of which outlet reports it.
+
+EXPLICIT LABELS: if a headline is itself prefixed or tagged as "Opinion", "Op-Ed", "Analysis:", "Commentary:", or similar explicit content-type labels, treat that as a decisive, mechanical signal — mark primary_incremental=false by default without needing to read further, UNLESS that opinion/analysis piece is explicitly reporting a specific new disclosed fact about this issuer (rare — most outlet-labeled opinion content is pure commentary). Don't hedge or reason "this might contain something material, requires full review" for explicitly-labeled opinion content — the label itself is the answer.
+
+ANALYTICAL FRAMING BEYOND STOCK PRICES: the same skepticism applied to "why did stock move" framing applies to any headline framed as a question or analytical claim about significance/impact rather than a statement of fact — e.g. "Why X could matter more than Y", "Why X matters for Z", "What X means for Y", "The case for/against X". These are argumentative/analytical framings regardless of topic (not just stock price), and should default to primary_incremental=false unless the body reports a specific new fact about this issuer distinguishable from the framing device itself. Similarly, editorializing headlines about financial ratios or trends framed as narrative rather than disclosure — e.g. "X's Debt Mountain Is Growing Faster Than Its Revenue", "X's Cash Burn Accelerates" — read as analyst/financial-blog commentary on already-known figures, not a fresh disclosure, and should be treated with the same skepticism as sell-side rating commentary above unless the article cites a specific new, dated disclosure (e.g. a just-filed 10-Q number) rather than just framing existing public figures narratively.
+
+Also watch for STALE PRIMARY COVERAGE: read the article's own text for internal date cues (e.g. "filed Monday", "announced earlier this week", "in a filing made public on [date]", "shares fell after Tuesday's disclosure") that indicate the underlying event actually happened noticeably earlier than the article's own publish date — this signals catch-up/secondary coverage of an already-disclosed fact, not the disclosure itself, even when the headline reads like breaking news ("Company X files for IPO") and the outlet is legitimate. Mark these primary_incremental=false unless the article itself adds a genuinely new fact beyond the earlier disclosure (updated terms, market reaction data, new figures not in the original disclosure).
 
 Be reasonably generous on "on_topic" (that's the low bar for the review digest) but strict and precise on "market_moving" and "primary_incremental" (those gate the main alert). When genuinely uncertain on "on_topic," lean inclusive; when uncertain on the other two, lean toward false.
 
@@ -1180,21 +1193,34 @@ def cross_model_disagreement_report(group_label, tickers, entries, context_type,
                                      previously_alerted_titles=None):
     """Runs the same candidate batch through whichever of Grok/GPT are
     configured (via XAI_API_KEY / OPENAI_API_KEY), using the identical
-    prompt and schema Claude uses, and returns a list of disagreement
-    records — one per article where at least one other model's
-    strict_relevant call differs from Claude's.
+    prompt and schema Claude uses.
 
-    This is purely a diagnostic/audit feature: it never affects what
-    goes into the main alert or review digest (Claude's judgment remains
-    authoritative for actual filtering). It exists to surface cases
-    worth manually reviewing — if multiple models disagree with Claude
-    on the same article, that's a stronger signal for prompt tuning than
-    Claude's judgment alone.
+    Returns (adjusted_verdicts, disagreement_records):
 
-    Returns [] immediately if neither XAI_API_KEY nor OPENAI_API_KEY is
-    configured, so this is a no-op by default."""
+    - adjusted_verdicts is claude_verdicts with one change: if BOTH Grok
+      and GPT are configured and BOTH independently say an article is
+      NOT relevant while Claude said it WAS, that article is vetoed out
+      of the main alert — strict_relevant is flipped to False and
+      broad_relevant forced True, so it still surfaces in the review
+      digest rather than disappearing entirely. This is based on
+      observed evidence, not just theory: in one day's real traffic,
+      every single case where both other models disagreed with a Claude
+      "relevant" call in the same direction turned out to be a genuine
+      false positive (opinion pieces, "Why X could matter" framing,
+      general industry deep-dives) that had already reached the full
+      distribution. Requires BOTH other models configured and in
+      agreement — a single dissenting model never overrides Claude,
+      only a 2-of-3 supermajority does. If only one or neither is
+      configured, this never vetoes anything, and adjusted_verdicts is
+      identical to claude_verdicts.
+    - disagreement_records is the diagnostic list for the disagreement
+      report email — one entry per article where at least one other
+      model's call differed from Claude's, vetoed or not.
+
+    Returns (claude_verdicts, []) immediately if neither XAI_API_KEY nor
+    OPENAI_API_KEY is configured, so this is a no-op by default."""
     if not entries or not (XAI_API_KEY or OPENAI_API_KEY):
-        return []
+        return claude_verdicts, []
 
     other_verdicts = {}
     if XAI_API_KEY:
@@ -1204,6 +1230,9 @@ def cross_model_disagreement_report(group_label, tickers, entries, context_type,
         other_verdicts["GPT"] = _assess_relevance_with(
             _call_gpt, "GPT", group_label, tickers, entries, context_type, previously_alerted_titles)
 
+    both_configured = bool(XAI_API_KEY) and bool(OPENAI_API_KEY)
+
+    adjusted_verdicts = []
     records = []
     for i, claude_v in enumerate(claude_verdicts):
         row_disagrees = False
@@ -1215,20 +1244,42 @@ def cross_model_disagreement_report(group_label, tickers, entries, context_type,
             if v.get("assessment_failed"):
                 # The call to this provider failed for this article — we
                 # genuinely don't know its opinion, so it's excluded from
-                # the comparison entirely rather than silently counted as
-                # agreement or disagreement based on a placeholder verdict.
+                # the comparison (and from veto eligibility) entirely
+                # rather than silently counted as agreement/disagreement.
                 continue
             other_calls[model_name] = v
             if v["strict_relevant"] != claude_v["strict_relevant"]:
                 row_disagrees = True
+
+        veto = (
+            both_configured
+            and claude_v["strict_relevant"]
+            and "Grok" in other_calls and "GPT" in other_calls
+            and not other_calls["Grok"]["strict_relevant"]
+            and not other_calls["GPT"]["strict_relevant"]
+        )
+        if veto:
+            v = dict(claude_v)
+            v["strict_relevant"] = False
+            v["broad_relevant"] = True
+            v["analysis"] = (
+                f"[VETOED — Claude said relevant, but both Grok and GPT independently disagreed] "
+                f"{claude_v['analysis']}"
+            )
+            adjusted_verdicts.append(v)
+        else:
+            adjusted_verdicts.append(claude_v)
+
         if row_disagrees:
             records.append({
                 "entry": claude_v["entry"],
                 "group_label": group_label,
                 "claude": claude_v,
                 "others": other_calls,
+                "vetoed": veto,
             })
-    return records
+
+    return adjusted_verdicts, records
 
 
 def main():
@@ -1320,13 +1371,14 @@ def main():
         prior_titles = _recent_alerted_titles(seen, f"corp:{parent}")
         verdicts = assess_relevance(parent, PARENT_GROUPS[parent], entries, context_type="corporate",
                                      previously_alerted_titles=prior_titles)
+        verdicts, records = cross_model_disagreement_report(
+            parent, PARENT_GROUPS[parent], entries, "corporate", verdicts, previously_alerted_titles=prior_titles)
+        disagreement_records.extend(records)
         strict_items, broad_extra_items = _log_split_and_record(verdicts, f"corp:{parent}")
         if strict_items:
             strict_corporate[parent] = strict_items
         if broad_extra_items:
             broad_corporate[parent] = broad_extra_items
-        disagreement_records.extend(cross_model_disagreement_report(
-            parent, PARENT_GROUPS[parent], entries, "corporate", verdicts, previously_alerted_titles=prior_titles))
 
     for location in list(new_local.keys()):
         entries = new_local[location]
@@ -1334,13 +1386,14 @@ def main():
         prior_titles = _recent_alerted_titles(seen, f"local:{location}")
         verdicts = assess_relevance(location, LOCATION_GROUPS[location], entries, context_type="local",
                                      previously_alerted_titles=prior_titles)
+        verdicts, records = cross_model_disagreement_report(
+            location, LOCATION_GROUPS[location], entries, "local", verdicts, previously_alerted_titles=prior_titles)
+        disagreement_records.extend(records)
         strict_items, broad_extra_items = _log_split_and_record(verdicts, f"local:{location}")
         if strict_items:
             strict_local[location] = strict_items
         if broad_extra_items:
             broad_local[location] = broad_extra_items
-        disagreement_records.extend(cross_model_disagreement_report(
-            location, LOCATION_GROUPS[location], entries, "local", verdicts, previously_alerted_titles=prior_titles))
 
     save_seen(seen)
 

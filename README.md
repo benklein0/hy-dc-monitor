@@ -156,19 +156,33 @@ Three layers of search, all feeding into a "Local / Site News" section:
    fail-open note further down for why the main alert specifically is
    protected from this).
 
-7. **Cross-model disagreement report (optional)** — a diagnostic-only
-   feature, off by default. If `XAI_API_KEY` and/or `OPENAI_API_KEY` are
-   set, every candidate batch that Claude assesses is also sent to Grok
-   and/or GPT using the identical prompt and schema
-   (`cross_model_disagreement_report`). Wherever another model's
-   `strict_relevant` call differs from Claude's, it shows up in a third
-   email — recipients set via `CROSS_MODEL_REPORT_EMAIL_TO` (defaults to
-   `REVIEW_EMAIL_TO`) — only sent when there's at least one actual
-   disagreement. This never changes what goes into the main alert or
-   review digest; Claude's judgment remains the one that actually gates
-   anything. It exists purely to surface cases where multiple models
-   disagree with Claude's call, which is a stronger tuning signal than
-   Claude's judgment reviewed alone. Leave both keys unset to skip this
+7. **Cross-model disagreement report and veto (optional)** — off by
+   default. If `XAI_API_KEY` and/or `OPENAI_API_KEY` are set, every
+   candidate batch that Claude assesses is also sent to Grok and/or GPT
+   using the identical prompt and schema
+   (`cross_model_disagreement_report`).
+
+   **This is no longer purely diagnostic.** When BOTH Grok and GPT are
+   configured and BOTH independently disagree with a Claude "relevant"
+   call (both say not relevant while Claude says relevant), that article
+   is automatically downgraded out of the main alert into the review
+   digest instead — a single dissenting model never overrides Claude,
+   only a genuine 2-of-3 supermajority does. This is evidence-based, not
+   theoretical: in one day's real traffic, every single case where both
+   other models disagreed with Claude in the same direction turned out
+   to be a real false positive that had already reached the full
+   distribution (opinion-labeled pieces, "Why X could matter" framing,
+   general industry deep-dives, sector-trend pieces) — see the commit
+   history around Sep 2026 for the specific examples. If only one or
+   neither of `XAI_API_KEY`/`OPENAI_API_KEY` is set, nothing is ever
+   vetoed — the report stays purely diagnostic in that case, same as
+   before.
+
+   Every article where at least one other model's call differed from
+   Claude's — vetoed or not — shows up in a third email, recipients set
+   via `CROSS_MODEL_REPORT_EMAIL_TO` (defaults to `REVIEW_EMAIL_TO`),
+   only sent when there's at least one actual disagreement, with vetoed
+   items clearly tagged. Leave both keys unset to skip this feature
    entirely — nothing else about the pipeline changes.
 
    Grok/GPT calls retry once after a 5s pause on a `429` (rate limit or
@@ -177,10 +191,11 @@ Three layers of search, all feeding into a "Local / Site News" section:
    because no payment method is on file yet (check
    platform.openai.com/settings/organization/limits and billing if this
    keeps happening). If a call still fails after the retry, that
-   provider's opinion is excluded from the comparison for that article
-   entirely — it's never treated as an implicit "not relevant" verdict,
-   which would otherwise risk manufacturing a false disagreement (or
-   false agreement) against Claude's real assessment.
+   provider's opinion is excluded from the comparison (and from veto
+   eligibility) for that article entirely — it's never treated as an
+   implicit "not relevant" verdict, which would otherwise risk
+   manufacturing a false disagreement, false agreement, or false veto
+   against Claude's real assessment.
 
    OpenAI's GPT-5 family (and the older o1/o3 reasoning models) reject
    the legacy `max_tokens` parameter outright with a `400 Bad Request`

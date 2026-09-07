@@ -499,17 +499,28 @@ def trim_seen(seen):
 # files for IPO" vs "American data center operator SB Energy is planning
 # an IPO" — which fuzzy title-matching alone won't catch since the wording
 # differs too much). Kept shorter than MAX_SEEN_AGE_DAYS (which governs how
-# long we remember hashes purely for exact-dedup purposes).
-RECENTLY_ALERTED_LOOKBACK_DAYS = 10
+# long we remember hashes purely for exact-dedup purposes). Widened from
+# an original 10 days — HY credit story arcs (an IPO process, a financing
+# round) often play out over multiple weeks with each new mention reworded,
+# and a too-short window let genuine re-reports slip through as "new."
+RECENTLY_ALERTED_LOOKBACK_DAYS = 21
 
 
-def _recent_alerted_titles(seen, tag, max_age_days=RECENTLY_ALERTED_LOOKBACK_DAYS):
+def _recent_alerted_context(seen, tag, max_age_days=RECENTLY_ALERTED_LOOKBACK_DAYS):
+    """Returns "TITLE — analysis" strings (not just bare titles) for
+    everything alerted on this bond group recently. Passing the actual
+    reported substance, not just the headline, catches cases where a new
+    article's wording gives no obvious hint of overlap with a prior
+    headline but reports the same underlying fact — matching purely on
+    title text alone can miss this."""
     cutoff = time.time() - max_age_days * 86400
-    return [
-        v["title"] for v in seen.values()
-        if v.get("tag") == tag and v.get("strict_relevant") and v.get("title")
-        and v.get("first_seen", 0) > cutoff
-    ]
+    out = []
+    for v in seen.values():
+        if v.get("tag") == tag and v.get("strict_relevant") and v.get("title") and v.get("first_seen", 0) > cutoff:
+            analysis = v.get("analysis", "")
+            out.append(f"{v['title']} — {analysis}" if analysis else v["title"])
+    return out
+
 
 
 def article_key(entry):
@@ -1104,13 +1115,23 @@ def _assess_relevance_with(call_fn, provider_label, group_label, tickers, entrie
 
     if previously_alerted_titles:
         prior_block = (
-            "\n\nHeadlines ALREADY SENT in the main alert for this bond group in the "
-            f"last {RECENTLY_ALERTED_LOOKBACK_DAYS} days (do not re-alert on the same "
-            "underlying event/story under different wording — check each candidate "
-            "against these for a semantic match, not just exact text overlap; if a "
-            "candidate covers the same fact already sent, mark primary_incremental=false "
-            "unless it adds a genuinely new incremental development beyond what's listed "
-            "here):\n" + "\n".join(f"- {t}" for t in previously_alerted_titles)
+            "\n\nALREADY SENT in the main alert for this bond group in the last "
+            f"{RECENTLY_ALERTED_LOOKBACK_DAYS} days (each line is the headline and the "
+            "substance of what was reported — do not re-alert on the same underlying "
+            "event/story under different wording or reframing; check each candidate "
+            "against these for a semantic match on the underlying FACT, not just "
+            "headline text overlap; if a candidate covers the same fact already sent, "
+            "mark primary_incremental=false unless it adds a genuinely new incremental "
+            "development beyond what's listed here. Watch specifically for QUANTITY "
+            "DRIFT: a new article citing a different dollar figure, MW figure, or other "
+            "quantity for what is plausibly the SAME underlying transaction/deal as "
+            "something already listed here (e.g. a '\\$7.5B hyperscaler lease' article "
+            "when a '\\$5.2B+ hyperscaler lease' was already alerted) is far more likely "
+            "an imprecise re-report or retail-blog estimate of the same deal than a "
+            "genuinely separate new transaction — treat it as the same story unless the "
+            "article explicitly confirms it's a distinct, additional deal (different "
+            "date, different counterparty, explicitly framed as a second/incremental "
+            "transaction)):\n" + "\n".join(f"- {t}" for t in previously_alerted_titles)
         )
     else:
         prior_block = ""
@@ -1358,17 +1379,20 @@ def main():
             elif v["broad_relevant"]:
                 broad_extra_items.append((v["entry"], v["analysis"]))
             # Record the verdict back onto the seen entry so future runs
-            # can tell Claude "this was already sent in the main alert" —
-            # this is what powers cross-run semantic-duplicate detection.
+            # can tell Claude "this was already sent in the main alert,
+            # and here's what it said" — this is what powers cross-run
+            # semantic-duplicate detection (both the fact that it was
+            # alerted, and the substance of what was reported).
             key = article_key(v["entry"])
             if key in seen:
                 seen[key]["strict_relevant"] = v["strict_relevant"]
+                seen[key]["analysis"] = v["analysis"]
         return strict_items, broad_extra_items
 
     for parent in list(new_corporate.keys()):
         entries = new_corporate[parent]
         print(f"  assessing corporate: {parent} ({len(entries)} candidate(s))")
-        prior_titles = _recent_alerted_titles(seen, f"corp:{parent}")
+        prior_titles = _recent_alerted_context(seen, f"corp:{parent}")
         verdicts = assess_relevance(parent, PARENT_GROUPS[parent], entries, context_type="corporate",
                                      previously_alerted_titles=prior_titles)
         verdicts, records = cross_model_disagreement_report(
@@ -1383,7 +1407,7 @@ def main():
     for location in list(new_local.keys()):
         entries = new_local[location]
         print(f"  assessing local: {location} ({len(entries)} candidate(s))")
-        prior_titles = _recent_alerted_titles(seen, f"local:{location}")
+        prior_titles = _recent_alerted_context(seen, f"local:{location}")
         verdicts = assess_relevance(location, LOCATION_GROUPS[location], entries, context_type="local",
                                      previously_alerted_titles=prior_titles)
         verdicts, records = cross_model_disagreement_report(

@@ -237,14 +237,29 @@ there's something new for that email type.
   catches near-identical wording. It won't catch "SB Energy files for
   IPO" and "American data center operator SB Energy is planning an IPO"
   as the same story, even though they clearly are — the wording differs
-  too much. To catch this, every bond group's *already-alerted* headlines
+  too much. To catch this, every bond group's *already-alerted* items
   (from `strict_relevant` verdicts, recorded back into `seen_articles.json`
   after each run) are passed to Claude as context for the next
-  `RECENTLY_ALERTED_LOOKBACK_DAYS` (10) days, with instructions to check
+  `RECENTLY_ALERTED_LOOKBACK_DAYS` (21) days, with instructions to check
   new candidates for a semantic — not just textual — match, and mark a
   re-reported version of an already-covered fact as non-incremental. This
   is what actually stops the same underlying story from re-appearing in
   the main alert every time a different outlet picks it up.
+
+  Two refinements on top of the original version: (1) the context passed
+  to Claude includes not just the prior headline but the actual reported
+  substance (`_recent_alerted_context`, stored as the analysis text
+  alongside `strict_relevant` in `seen_articles.json`) — a bare headline
+  alone can fail to hint at the overlap even when the underlying fact is
+  identical; (2) explicit **quantity drift** detection — a new article
+  citing a different dollar or MW figure for what's plausibly the same
+  deal (e.g. a "\$7.5B hyperscaler lease" story when a "\$5.2B+" version of
+  the same deal was already alerted) is treated as an imprecise
+  re-report of the same transaction, not a new one, unless the article
+  explicitly confirms it's a distinct, additional deal. The lookback
+  window was also widened from an original 10 days to 21, since HY
+  credit story arcs (an IPO process, a financing round) often play out
+  over multiple weeks with each new mention reworded.
 - **3-day hard age cutoff** (`MAX_ARTICLE_AGE_DAYS`) — tightened from an
   earlier 14-day version after a Denton, TX article with an actual byline
   of Aug 21 surfaced in a Sept 3 run (13 days old — technically inside a

@@ -196,12 +196,20 @@ BONDS = {
     # No bond ticker known yet — "ZENARC" is a placeholder key I made up
     # so this fits the existing dict structure. Swap it for the real
     # ticker once it's assigned; nothing else needs to change.
+    #
+    # Tenant/parent-facing name updated 2026-09-08 from public sources
+    # (the project's own site at okmulgeefluidstack.io, and the Okmulgee
+    # city government's data-center documentation page) after a real
+    # local-news miss traced back to stale SITE_KEYWORDS here — see the
+    # note on that dict below. These are public-facing project sources,
+    # not the bond offering memo, so treat as a starting point to verify
+    # against the actual OM rather than as confirmed bond documentation.
     "ZENARC": {
         "name": "Zenith Arc LLC",
         "parent": "Zenith Arc",
         "locations": ["Okmulgee, Oklahoma"],
         "coupon_maturity": "unknown — no offering details yet",
-        "tenant": "unconfirmed",
+        "tenant": "Fluidstack (developer); Jane Street reported as first/anchor tenant — unconfirmed against the OM",
         "lease": "unknown",
     },
 }
@@ -240,9 +248,26 @@ SITE_KEYWORDS = {
     "Barker, New York": ["Lake Mariner", "Somerset New York", "Niagara County", "National Grid"],
     "Abernathy, Texas": ["Hale County Texas", "Lubbock County"],
     "Loudoun County, Virginia": ["Dominion Energy", "Data Center Alley"],
+    # 2026-09-08: the original four terms below were researched guesses
+    # made before any public reporting confirmed the actual project — none
+    # of them are the real developer, tenant, or utility name, and a real
+    # article (Okmulgee Times, "Commissioners hear details behind denial
+    # of data center floodplain permit," 2026-09-02) was missed entirely
+    # as a result: it never mentions any of them, only "FluidStack" (the
+    # confirmed developer per okmulgeefluidstack.io and the city's own
+    # data-center documentation page) and "Jane Street" (reported anchor
+    # tenant). Added as quoted two-word phrases scoped to this site
+    # specifically, rather than bare "Fluidstack"/"Jane Street" alone —
+    # Fluidstack develops several OTHER tracked sites (CIFR, MERIDI,
+    # FLASHC) and Jane Street is a large, unrelated trading firm, so
+    # either name alone would be a recall/noise trade in the wrong
+    # direction. Left the original four in place rather than deleting
+    # them outright, in case they're real but just not what this
+    # particular article happened to use.
     "Okmulgee, Oklahoma": [
         "Redd Ridge Consulting", "Three Rivers Manufacturing", "Hodges Warehouse",
         "Okmulgee Area Development Corporation", "East Central Oklahoma Electric",
+        "Fluidstack Okmulgee", "Jane Street Okmulgee",
     ],
 }
 
@@ -329,6 +354,13 @@ BASE_LOCAL_TERMS = [
     "sued", "litigation", "dispute", "utility", "electricity",
     "power plant", "grid", "interconnection", "public utilities commission",
     "regulator", "regulators",
+    # Added 2026-09-08 after a real floodplain-development-permit denial
+    # (Okmulgee County, ZENARC's site) was missed — "water use" already
+    # covers consumption/discharge disputes but not FEMA-adjacent
+    # floodplain permitting, a distinct and recurring category for
+    # large-footprint industrial/datacenter siting generally, not just
+    # this one county.
+    "floodplain",
 ]
 
 # Tenant/hyperscaler + grid interconnect (ISO/RTO) terms per location,
@@ -522,6 +554,85 @@ def _recent_alerted_context(seen, tag, max_age_days=RECENTLY_ALERTED_LOOKBACK_DA
     return out
 
 
+# ---------------------------------------------------------------------------
+# Credit / site ledger — a durable, NEVER-trimmed record of confirmed news,
+# separate from `seen` (which exists purely for dedup and is deliberately
+# pruned after MAX_SEEN_AGE_DAYS, by design — it answers "have we already
+# alerted on this?", a question that only needs a short memory). The ledger
+# answers a different question: "what's actually happened at this site, or
+# to this credit, for as long as this monitor has been running?" — one the
+# dedup file structurally can't answer once an entry ages out.
+#
+# An event qualifies for the ledger if on_topic AND primary_incremental are
+# both true — a confirmed, new, on-topic fact — regardless of whether
+# market_moving also passed. market_moving is a MAIN-ALERT bar (deliberately
+# conservative, especially for corporate news, which requires a stated
+# mechanism tying it to bond economics); the ledger is meant to be audited
+# periodically by a human, not to gate an inbox, so it's fine — better,
+# even — to include real confirmed developments that weren't judged
+# material enough to interrupt anyone's day but that build into a fuller
+# site/credit history over time. Organized primarily by location (the
+# local/site layer is the more decision-relevant one per this project's own
+# thesis — see README), with corporate-context events filed by parent
+# company instead, since a corporate story usually isn't about one site.
+LEDGER_FILE = os.environ.get(
+    "LEDGER_FILE_PATH",
+    os.path.join(os.path.dirname(SEEN_FILE), "credit_ledger.json") if os.path.dirname(SEEN_FILE) else "credit_ledger.json",
+)
+
+
+def load_ledger():
+    data = {}
+    if os.path.exists(LEDGER_FILE):
+        try:
+            with open(LEDGER_FILE, "r") as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            data = {}
+    data.setdefault("by_location", {})  # location string -> [event, ...] (chronological)
+    data.setdefault("by_parent", {})    # parent company name -> [event, ...] (chronological)
+    return data
+
+
+def save_ledger(ledger):
+    parent_dir = os.path.dirname(LEDGER_FILE)
+    if parent_dir and not os.path.isdir(parent_dir):
+        try:
+            os.makedirs(parent_dir, exist_ok=True)
+        except OSError as e:
+            print(f"[warn] could not create directory for LEDGER_FILE_PATH ({parent_dir}): {e}")
+    with open(LEDGER_FILE, "w") as f:
+        json.dump(ledger, f, indent=2)
+
+
+def record_ledger_event(ledger, context_type, group_label, tickers, verdict, article_hash):
+    """Appends a confirmed (on_topic AND primary_incremental) event to the
+    ledger — see the module-level comment above for why that's the bar,
+    not strict_relevant. Idempotent: keyed on the same article hash used
+    for seen-dedup, so re-processing the same seen entry (shouldn't happen
+    in normal operation, but cheap to guard against) never double-records."""
+    if not (verdict.get("on_topic") and verdict.get("primary_incremental")):
+        return
+    entry = verdict["entry"]
+    bucket_key = "by_location" if context_type == "local" else "by_parent"
+    bucket = ledger[bucket_key].setdefault(group_label, [])
+    if any(e.get("hash") == article_hash for e in bucket):
+        return
+    bucket.append({
+        "hash": article_hash,
+        "date": entry.get("published", ""),
+        "recorded_at": datetime.now(timezone.utc).isoformat(),
+        "title": entry.get("title", "Untitled"),
+        "link": entry.get("link", ""),
+        "source": _entry_source_name(entry),
+        "tickers": tickers,
+        "context_type": context_type,
+        "market_moving": bool(verdict.get("market_moving")),
+        "reached_main_alert": bool(verdict.get("strict_relevant")),
+        "analysis": verdict.get("analysis", ""),
+    })
+
+
 
 def article_key(entry):
     basis = entry.get("link") or entry.get("title", "")
@@ -690,9 +801,48 @@ def fetch_curated_entries(location):
     return results
 
 
+# Locations are stored as "City[, County], State" (BONDS's own internal
+# bookkeeping convention) and every location-based query used to require
+# that exact phrase verbatim. Real local/hyperlocal coverage routinely
+# doesn't write it that way — a real article ("Commissioners hear details
+# behind denial of data center floodplain permit," Okmulgee Times,
+# 2026-09-02, about ZENARC's own site) said "Okmulgee County" throughout
+# and never once wrote "Okmulgee, Oklahoma," so the query silently never
+# matched it. Added 2026-09-08: also search the location with its
+# trailing ", State" segment stripped, which is much closer to how a
+# local outlet covering its own town actually refers to it.
+#
+# Deliberately NOT stripped down to just the first comma segment for
+# locations with a "Town, County, State" shape (e.g. "New Lebanon,
+# Sullivan County, Indiana") — collapsing to the bare town name risks
+# landing on an unrelated same-named town elsewhere in the country.
+# Stripping only the trailing state name keeps what's left specific.
+#
+# A location whose state-stripped form is itself a generic word or a
+# common surname (rather than a distinctive place name) skips this
+# widening — see LOCATION_KEEP_FULL_PHRASE below.
+LOCATION_KEEP_FULL_PHRASE = {
+    "Marble, North Carolina",  # "Marble" alone is a common noun (countertops, quarries, decor)
+    "Andrews, Texas",          # "Andrews" alone is a common surname/place name nationwide
+}
+
+
+def _location_query_terms(location, widen=True):
+    terms = [location]
+    if widen and location not in LOCATION_KEEP_FULL_PHRASE and "," in location:
+        stripped = location.rsplit(",", 1)[0].strip()
+        if stripped and stripped != location:
+            terms.append(stripped)
+    return terms
+
+
+def _location_query_clause(location, widen=True):
+    return _keyword_clause(_location_query_terms(location, widen=widen))
+
+
 def fetch_local_news(location):
     terms = BASE_LOCAL_TERMS + TENANT_KEYWORDS.get(location, [])
-    query = f'"{location}" {_keyword_clause(terms)}'
+    query = f'{_location_query_clause(location)} {_keyword_clause(terms)}'
     return fetch_news(query)
 
 
@@ -737,7 +887,7 @@ def fetch_raw_location_news(location):
     safe at any batch size."""
     if location in RAW_LOCATION_SEARCH_EXCLUDE:
         return []
-    return fetch_news(f'"{location}"')
+    return fetch_news(_location_query_clause(location))
 
 
 # ---------------------------------------------------------------------------
@@ -1397,6 +1547,7 @@ def main():
           f"{len(PARENT_GROUPS)} corporate + {len(LOCATION_GROUPS)} local queries "
           f"(plus site-specific + curated feeds per location)")
     seen = load_seen()
+    ledger = load_ledger()
     seen_titles = {
         _normalize_title(v["title"])
         for v in seen.values()
@@ -1450,7 +1601,7 @@ def main():
     broad_corporate, broad_local = {}, {}  # on-topic but excluded from strict — for QC review only
     disagreement_records = []  # cross-model audit only, never gates the real emails
 
-    def _log_split_and_record(verdicts, tag):
+    def _log_split_and_record(verdicts, tag, context_type, group_label, tickers):
         strict_items = []
         broad_extra_items = []
         for v in verdicts:
@@ -1473,6 +1624,11 @@ def main():
             if key in seen:
                 seen[key]["strict_relevant"] = v["strict_relevant"]
                 seen[key]["analysis"] = v["analysis"]
+            # Separately, record it into the durable ledger if it clears
+            # the "confirmed real news" bar (on_topic + primary_incremental
+            # — see the ledger's module-level comment for why that's a
+            # different, and deliberately lower, bar than strict_relevant).
+            record_ledger_event(ledger, context_type, group_label, tickers, v, key)
         return strict_items, broad_extra_items
 
     for parent in list(new_corporate.keys()):
@@ -1484,7 +1640,8 @@ def main():
         verdicts, records = cross_model_disagreement_report(
             parent, PARENT_GROUPS[parent], entries, "corporate", verdicts, previously_alerted_titles=prior_titles)
         disagreement_records.extend(records)
-        strict_items, broad_extra_items = _log_split_and_record(verdicts, f"corp:{parent}")
+        strict_items, broad_extra_items = _log_split_and_record(
+            verdicts, f"corp:{parent}", "corporate", parent, PARENT_GROUPS[parent])
         if strict_items:
             strict_corporate[parent] = strict_items
         if broad_extra_items:
@@ -1499,13 +1656,15 @@ def main():
         verdicts, records = cross_model_disagreement_report(
             location, LOCATION_GROUPS[location], entries, "local", verdicts, previously_alerted_titles=prior_titles)
         disagreement_records.extend(records)
-        strict_items, broad_extra_items = _log_split_and_record(verdicts, f"local:{location}")
+        strict_items, broad_extra_items = _log_split_and_record(
+            verdicts, f"local:{location}", "local", location, LOCATION_GROUPS[location])
         if strict_items:
             strict_local[location] = strict_items
         if broad_extra_items:
             broad_local[location] = broad_extra_items
 
     save_seen(seen)
+    save_ledger(ledger)
 
     if strict_corporate or strict_local:
         msg = build_email(strict_corporate, strict_local)

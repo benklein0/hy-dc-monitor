@@ -34,9 +34,13 @@ frequently the more decision-relevant signal.
 | WULF | TeraWulf - WULF Compute LLC | TeraWulf | Barker, NY |
 | FLASHC | TeraWulf/Fluidstack JV - Flash Compute LLC | TeraWulf | Abernathy, TX |
 | YNDRDC | Yondr Group - Yondr JK 1, LLC | Yondr Group | Loudoun County, VA |
+| ZENARC | Zenith Arc LLC | Zenith Arc | Okmulgee, OK |
 
 To add/remove bonds or fix a location, edit the `BONDS` dict at the top of
-`monitor.py`.
+`monitor.py`. `ZENARC` is a placeholder ticker (no real bond ticker is known
+yet) and its tenant field is a best guess from public sources (project
+website, city government page) rather than the offering memo — see the
+comment on the `BONDS` entry before treating it as confirmed.
 
 ## How it works
 
@@ -59,6 +63,24 @@ Three layers of search, all feeding into a "Local / Site News" section:
    tenant-specific and interconnection-queue coverage is often the most
    material site-level news but wouldn't otherwise surface from generic
    zoning/tax keywords alone.
+
+   **Location phrase widening** (`_location_query_terms`,
+   `LOCATION_KEEP_FULL_PHRASE`) — both this layer and the raw recall layer
+   (#5 below) originally searched only the exact `"City, State"` string
+   from `BONDS`/`SITE_KEYWORDS`, e.g. `"Okmulgee, Oklahoma"`. Real local
+   coverage doesn't reliably write it that way: a real article
+   ("Commissioners hear details behind denial of data center floodplain
+   permit," Okmulgee Times, 2026-09-02, about ZENARC's own site) was
+   missed entirely because it says "Okmulgee County" throughout and never
+   once writes "Okmulgee, Oklahoma," so the exact-phrase query silently
+   never matched it. Both layers now also search the bare place name on
+   its own (`Okmulgee` in addition to `"Okmulgee, Oklahoma"`), which is a
+   real precision/recall tradeoff — a bare town name can pick up more
+   noise than the qualified phrase — so it's deliberately **not** applied
+   to locations whose bare name collides with an unrelated well-known
+   place (`LOCATION_KEEP_FULL_PHRASE`: currently Marble, NC and Andrews,
+   TX, both real other things, so those two keep searching the full
+   qualified phrase only).
 3. **Site-specific terms** (`SITE_KEYWORDS`) — researched utility company
    names, project/campus nicknames, and county names per site (e.g.
    TeraWulf's Barker, NY site is publicly known as "Lake Mariner"; Dalton,
@@ -239,6 +261,46 @@ type per run, split into "Corporate News" and "Local / Site News" sections
 within the main and review emails, via the Resend API — only sent if
 there's something new for that email type.
 
+## Credit / site ledger (`credit_ledger.json`)
+
+`seen_articles.json` is a dedup cache, not a history — it only has to
+remember enough to answer "have we already alerted on this?", so entries
+are pruned after `MAX_SEEN_AGE_DAYS` (14 days) on purpose. That leaves no
+persistent answer to "what's actually happened at Barker, NY?" or "what's
+this quarter looked like for CIFR?" — the ledger exists to answer exactly
+that, and is never trimmed.
+
+Every run, any candidate that clears **on_topic AND primary_incremental**
+— a confirmed, new, on-topic fact, regardless of whether `market_moving`
+also passed — gets appended to `credit_ledger.json` (same directory as
+`SEEN_FILE_PATH`; override with `LEDGER_FILE_PATH` if you want it
+elsewhere). That's deliberately a lower bar than the main alert
+(`strict_relevant`, which also requires `market_moving`): the ledger is
+meant to be audited periodically by a human, not to gate an inbox, so it's
+better to over-include real, confirmed developments — even ones judged
+not material enough to interrupt anyone's day — than to end up with the
+same 14-day amnesia as the dedup file.
+
+Two top-level buckets, matching the local/corporate split used everywhere
+else in this pipeline:
+- `by_location` — keyed by the exact location strings in `BONDS`/
+  `LOCATION_GROUPS`. This is the primary axis: local/site news is where
+  the earliest, most decision-relevant signal for this kind of debt tends
+  to show up (see "Why the local-news layer matters" above), so this is
+  the one to read first when auditing a specific site/municipality.
+- `by_parent` — keyed by parent company name (`PARENT_GROUPS`), for
+  corporate-context events, which usually aren't about one physical site.
+
+Each event records: `hash` (same article hash as `seen_articles.json`, for
+idempotency across re-runs), `date`, `recorded_at`, `title`, `link`,
+`source`, `tickers`, `context_type`, `market_moving`,
+`reached_main_alert` (whether it also cleared `strict_relevant`), and
+`analysis`. A [Site & Credit Ledger dashboard](https://claude.ai/code/artifact/29be2b7c-fa13-4f9b-8b87-cc9cbd2157f1)
+renders this as a browsable timeline by site and by credit — it's a
+snapshot seeded from alert history, not a live feed off the Railway
+volume yet (see "Next steps" below), so ask for a refresh with the
+current `credit_ledger.json` when you want it brought up to date.
+
 **Quality controls:**
 - **Anchor-term requirement** — site-specific and curated-feed matches
   require a data-center/energy anchor term (`data center`, `datacenter`,
@@ -247,6 +309,16 @@ there's something new for that email type.
   enough to appear in unrelated local news on their own — e.g. a bare
   "Whitfield County" match once pulled in a high-school volleyball
   recap — so those terms alone are no longer sufficient.
+- **`floodplain` anchor term** — added 2026-09-08 to `BASE_LOCAL_TERMS`
+  after the ZENARC/Okmulgee miss above; `water use` already covered
+  consumption/discharge disputes but not FEMA-adjacent floodplain
+  development permitting, a distinct and recurring category for
+  site-specific project finance debt. Same incident also added two
+  precise compound-phrase entries to `SITE_KEYWORDS["Okmulgee, Oklahoma"]`
+  (`"Fluidstack Okmulgee"`, `"Jane Street Okmulgee"`) once public sources
+  turned up Fluidstack as the site's developer and Jane Street as its
+  reported anchor tenant — see the `BONDS["ZENARC"]["tenant"]` caveat
+  above before treating either as confirmed.
 - **Fuzzy headline dedup** — the same story from two outlets (e.g. a wire
   story picked up by both a local paper and a national one) often has
   different URLs and slightly reworded headlines, which URL-hash dedup

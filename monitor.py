@@ -1204,23 +1204,81 @@ def fetch_youtube_search(query_text):
 #
 # Most state docket-search systems are legacy ASP.NET WebForms apps that
 # require simulating a postback (__doPostBack / __VIEWSTATE) to actually
-# RUN a search — not reachable with a plain HTTP GET. Nevada's PUCN
-# (pucweb1.state.nv.us) is the one confirmed exception found so far: its
-# default docket-LIST page (no search needed) renders the full current
-# "Active Electric Dockets" table server-side on a plain GET — only its
-# per-row "View" detail action needs a postback, which this doesn't use.
-# So rather than simulate a search, this treats the whole default-view
-# page as one big recall net (in the same spirit as
-# fetch_raw_location_news) and text-matches tracked entity names against
-# it directly.
+# RUN a search — not reachable with a plain HTTP GET/POST. Three states are
+# now confirmed real, plain-HTTP-reachable exceptions, each verified live
+# (not guessed) via hands-on browser automation on 2026-09-13:
 #
-# ONLY NEVADA IS IMPLEMENTED. The other 9 tracked states were checked at a
-# glance (2026-09-13) but none confirmed cleanly enough to build against
-# without real per-state verification first — see PUC_DOCKET_SOURCES'
-# comment below for what's known about each. Building against an unverified
-# guess here is worse than not building it at all: a scraper that quietly
-# returns zero results every run because the URL/structure is wrong looks
-# identical to "nothing new to report," which is a false sense of coverage.
+#   - Nevada PUCN (pucweb1.state.nv.us) — "nv_browse". Its default
+#     docket-LIST page (no search needed) renders the full current "Active
+#     Electric Dockets" table server-side on a plain GET — only its
+#     per-row "View" detail action needs a postback, which this doesn't
+#     use. So rather than simulate a search, this treats the whole
+#     default-view page as one big recall net (in the same spirit as
+#     fetch_raw_location_news) and text-matches tracked entity names
+#     against it directly.
+#   - North Dakota PSC (apps.psc.nd.gov) — "nd_search". Confirmed to be a
+#     PLAIN HTML FORM POST — not an ASP.NET postback, no VIEWSTATE/CSRF
+#     token needed — to https://apps.psc.nd.gov/cases/pscasesearch with
+#     field names jurisdictionId, casePrefix, caseYear, caseSequence,
+#     caseStatusCode, caseTypeCode, caseCategoryCode, entityName,
+#     description, filedFromDate, filedToDate, closedFromDate,
+#     closedToDate, search. Verified with a real, current result posting
+#     entityName="Applied Digital" (the parent name already in BONDS — no
+#     obscure subsidiary needed here, unlike Nevada): case "PU-26-155
+#     Applied Digital Backup Generation," filed 2026.04.24. Case numbers
+#     look like "PU-26-155"; dates are formatted YYYY.MM.DD.
+#   - Georgia PSC (psc.ga.gov) — "ga_search". Confirmed real underlying
+#     JSON API (no auth) at
+#     https://psc.ga.gov/facts-advanced-search/document-filings-service/,
+#     found by inspecting the live page's own network requests. GOTCHA
+#     found by trial and error: every unused query param must be an EMPTY
+#     STRING, not the literal text "false" — sending "false" silently
+#     returns {"resultsCount": null, "resultsItems": null} for ANY query,
+#     including ones that obviously have real matches, which looks
+#     identical to "no results" if you don't catch it. Verified with a
+#     real, current result querying description="data center" (company
+#     empty): a 2026-08-12 NRDC/SACE/Sierra Club joint letter on data
+#     center load growth, filed under docket 44280 — Georgia Power's
+#     "Large Load" tariff/contract docket. Georgia Power itself files
+#     thousands of unrelated dockets a year, so this queries by
+#     description rather than by company to stay targeted, and (unlike
+#     Nevada/North Dakota) isn't filtered further by per-site keywords
+#     below: a state-level "Large Load" policy docket like 44280 matters
+#     to every Georgia site tracked here whether or not it happens to
+#     name a specific site or tenant, so over-filtering it by e.g.
+#     "CoreWeave" or "Alibaba" would silently drop exactly the kind of
+#     utility-wide filing this layer exists to catch.
+#
+# STILL NOT IMPLEMENTED for the remaining 6 tracked states — checked
+# directly (not guessed) as of 2026-09-13, each still genuinely blocked:
+#   - Texas (PUCT Interchange) — confirmed real GET-parameterized docket
+#     lookups by known control number, plus a separate "Daily Filing
+#     Search" page that MAY list new filings without already knowing a
+#     control number — WebFetch attempts on it were blocked
+#     (ROBOTS_DISALLOWED / a provenance gate), not yet retried via live
+#     browser automation. Covers Colorado City, Wink, Andrews, Denton,
+#     Austin, Abernathy. (ERCOT's own site — checked directly at the
+#     user's suggestion, not guessed — turned out to be a landing-page
+#     hub with no feed/API/queue data at either /news or
+#     /services/rq/large-load-integration, so it's a dead end, not a
+#     pending item.)
+#   - Indiana (IURC) — confirmed real weekly-filings PDFs at predictable
+#     URLs (e.g. in.gov/iurc/files/Weekly-Filings-List-6.1.26-6.5.26.pdf),
+#     real row format "Date | Case Number | Entity Name | Filing
+#     Description" — but IURC dockets are filed under the utility (Duke
+#     Energy Indiana / Hoosier Energy), not the data center project
+#     itself, and no confirmed project/tenant entity name has turned up
+#     in one yet to search for. Covers New Lebanon/Sullivan County.
+#   - Oklahoma (OCC) and New York (DPS/DMM) — confirmed to need a
+#     postback or an already-known case number for discovery search
+#     (Oracle APEX session-based app for OK; classic ASP.NET
+#     __doPostBack for NY) — would need a headless browser, not a plain
+#     scraper like this one. Covers Muskogee/Okmulgee (OK) and Barker
+#     (NY).
+#   - North Carolina Utilities Commission and Virginia SCC — WebFetch
+#     attempts were blocked (ROBOTS_DISALLOWED / a provenance gate) on
+#     every URL tried so far; not yet retried via live browser
+#     automation. Covers Marble (NC) and Loudoun County (VA).
 PUC_ENTITY_NAMES = {
     "Storey County, Nevada": ["Reno Power NR 1 LLC"],
     # TRACTD (the sibling Storey County bond, same site) almost certainly
@@ -1229,69 +1287,49 @@ PUC_ENTITY_NAMES = {
     # actual name well enough to add it here without guessing. Worth
     # checking the TRACTD OM's interconnection agreement, or the NV PUC
     # active-dockets list directly for other "Reno Power" filers.
+    "Ellendale, North Dakota": ["Applied Digital"],
+    "Harwood, North Dakota": ["Applied Digital"],
+    # Georgia's ga_search doesn't key off an entity name (see comment
+    # above) — no entry needed here for Dalton/Atlanta.
 }
 
 PUC_DOCKET_SOURCES = {
     "Storey County, Nevada": {
         "name": "Nevada PUC (PUCN) — active electric dockets",
+        "method": "nv_browse",
         "url": "https://pucweb1.state.nv.us/puc2/DktInfo.aspx?Util=Electric&AspxAutoDetectCookieSupport=1",
     },
-    # NOT YET IMPLEMENTED for the other tracked states — one-glance
-    # research findings as of 2026-09-13, each needs real hands-on
-    # verification (not guesswork) before adding a URL here:
-    #   - Texas (PUCT Interchange) — confirmed real GET-parameterized
-    #     docket lookups by known control number, plus a separate "Daily
-    #     Filing Search" page that MAY list new filings without already
-    #     knowing a control number (i.e. a Nevada-style discovery list) —
-    #     not verified closely enough yet. Covers Colorado City, Wink,
-    #     Andrews, Denton, Austin, Abernathy.
-    #   - Indiana (IURC) — has a "Weekly Filings" page that looked like a
-    #     plain static list of newly-filed documents, no search needed —
-    #     promising but not verified closely enough yet. Covers New
-    #     Lebanon/Sullivan County.
-    #   - Oklahoma (OCC) and New York (DPS/DMM) — confirmed to need a
-    #     postback or an already-known case number for discovery search
-    #     (Oracle APEX session-based app for OK; classic ASP.NET
-    #     __doPostBack for NY) — would need a headless browser, not a
-    #     plain scraper like this one. Covers Muskogee/Okmulgee (OK) and
-    #     Barker (NY).
-    #   - Georgia (PSC FACTS), North Dakota PSC, Illinois Commerce
-    #     Commission, North Carolina Utilities Commission, and Virginia
-    #     SCC — inconclusive, not confirmed scrapable OR unscrapable.
-    #     Covers Ellendale/Harwood (ND), Dalton/Atlanta (GA),
-    #     Marble (NC), Chicago/Elk Grove Village (IL), Loudoun County (VA).
+    "Ellendale, North Dakota": {
+        "name": "North Dakota PSC — case search",
+        "method": "nd_search",
+        "url": "https://apps.psc.nd.gov/cases/pscasesearch",
+    },
+    "Harwood, North Dakota": {
+        "name": "North Dakota PSC — case search",
+        "method": "nd_search",
+        "url": "https://apps.psc.nd.gov/cases/pscasesearch",
+    },
+    "Dalton, Georgia": {
+        "name": "Georgia PSC — FACTS document filings",
+        "method": "ga_search",
+        "url": "https://psc.ga.gov/facts-advanced-search/document-filings-service/",
+    },
+    "Atlanta, Georgia": {
+        "name": "Georgia PSC — FACTS document filings",
+        "method": "ga_search",
+        "url": "https://psc.ga.gov/facts-advanced-search/document-filings-service/",
+    },
+    # NOT YET IMPLEMENTED for the other 6 tracked states — see the module
+    # comment above for exactly what's confirmed vs. still blocked for
+    # each (Texas, Indiana, Oklahoma, New York, North Carolina, Virginia).
 }
 
 
-def fetch_puc_dockets(location):
-    """Treats a state PUC's plain-GET default docket listing as one big
-    recall net (no search/postback simulated) and text-matches tracked
-    entity names (PUC_ENTITY_NAMES) against it directly. Unlike
-    BASE_LOCAL_TERMS's generic words, an entity name like "Reno Power NR 1
-    LLC" is specific enough to stand alone as a match — no separate
-    anchor-term gate needed. No-op (returns []) for any location without
-    both a registered source AND at least one entity name to search for —
-    see the module comment above for why only Nevada has both right now.
-
-    Returns entries shaped like every other fetch_* function (title,
-    summary, link, published, published_parsed, source) so they flow
-    through the exact same dedup/relevance/ledger pipeline as a news
-    article — a real regulatory filing is, if anything, a MORE primary
-    and credible source than ordinary press coverage, so this is wired
-    into the same main-alert-eligible local pipeline (fetch_local_news
-    etc.), not the lower-trust social/video digest.
-
-    Each candidate's "link" is the docket page's own URL with a unique
-    #row-<hash> fragment appended — a real per-docket detail page isn't
-    directly linkable without simulating the postback the site's own
-    "View" action uses, so this points at the same search page every
-    time but keeps dedup hashing (article_key hashes on link) stable per
-    distinct row content rather than colliding all matches from a state
-    onto one hash."""
-    source = PUC_DOCKET_SOURCES.get(location)
-    entity_names = PUC_ENTITY_NAMES.get(location, [])
-    if not source or not entity_names:
-        return []
+def _puc_docket_nv_browse(location, source, entity_names):
+    """Nevada: treats the whole plain-GET default docket-list page as one
+    big recall net and text-matches tracked entity names against it
+    directly — see the module comment above for why this state doesn't
+    need to simulate a search."""
     try:
         resp = requests.get(source["url"], timeout=30, headers={"User-Agent": "Mozilla/5.0"})
         resp.raise_for_status()
@@ -1338,6 +1376,176 @@ def fetch_puc_dockets(location):
             "source": {"title": source["name"]},
         })
     return results
+
+
+_ND_CASE_NUMBER_RE = re.compile(r'\b([A-Z]{2}-\d{2}-\d{3,6})\b')
+
+
+def _puc_docket_nd_search(location, source, entity_names):
+    """North Dakota: POSTs the confirmed plain HTML search form once per
+    tracked entity name, then splits the flattened response text on
+    case-number boundaries (e.g. "PU-26-155") to isolate each case's own
+    chunk of text — the real results table's raw HTML structure wasn't
+    directly captured during verification, so this is a best-effort
+    recall net in the same spirit as the Nevada branch, rather than a
+    precise per-cell parse."""
+    results = []
+    for term in entity_names:
+        try:
+            resp = requests.post(
+                source["url"],
+                data={
+                    "jurisdictionId": "",
+                    "casePrefix": "",
+                    "caseYear": "",
+                    "caseSequence": "",
+                    "caseStatusCode": "",
+                    "caseTypeCode": "",
+                    "caseCategoryCode": "",
+                    "entityName": term,
+                    "description": "",
+                    "filedFromDate": "",
+                    "filedToDate": "",
+                    "closedFromDate": "",
+                    "closedToDate": "",
+                    "search": "Search",
+                },
+                timeout=30,
+                headers={"User-Agent": "Mozilla/5.0"},
+            )
+            resp.raise_for_status()
+            html = resp.text
+        except Exception as e:
+            print(f"[warn] PUC docket fetch failed for {location} ({source['name']}, term={term!r}): {e}")
+            continue
+
+        text = re.sub(r'(?i)</tr>|<br\s*/?>', '\n', html)
+        text = re.sub(r'(?i)</td>|</th>', '\t', text)
+        text = re.sub(r'<[^>]+>', ' ', text)
+        text = text.replace('&nbsp;', ' ').replace('&amp;', '&')
+        text = re.sub(r'[ \t]+', ' ', text)
+
+        matches = list(_ND_CASE_NUMBER_RE.finditer(text))
+        for i, m in enumerate(matches):
+            case_no = m.group(1)
+            start = m.start()
+            end = matches[i + 1].start() if i + 1 < len(matches) else min(len(text), start + 500)
+            chunk = text[start:end].strip()
+            if term.lower() not in chunk.lower():
+                continue
+            row_hash = hashlib.sha1(chunk.encode("utf-8")).hexdigest()[:12]
+            date_match = re.search(r'\b(\d{4}\.\d{2}\.\d{2})\b', chunk)
+            published_struct, published_str = None, ""
+            if date_match:
+                try:
+                    published_struct = time.strptime(date_match.group(1), "%Y.%m.%d")
+                    published_str = date_match.group(1)
+                except ValueError:
+                    pass
+            results.append({
+                "title": f"{source['name']}: case {case_no} mentioning {term}",
+                "summary": chunk[:500],
+                "link": f"{source['url']}#case-{case_no}-{row_hash}",
+                "published": published_str,
+                "published_parsed": published_struct,
+                "source": {"title": source["name"]},
+            })
+    return results
+
+
+def _puc_docket_ga_search(location, source):
+    """Georgia: queries the confirmed real JSON filings API for dockets
+    whose description mentions "data center" — see the module comment
+    above for the empty-string-not-"false" gotcha and for why this
+    doesn't additionally filter by per-site keywords (a state-level
+    "Large Load" policy docket matters to every Georgia site regardless
+    of whether it happens to name one by name)."""
+    try:
+        resp = requests.get(
+            source["url"],
+            params={
+                "docketId": "",
+                "documentId": "",
+                "statusId": "",
+                "industryId": "",
+                "description": "data center",
+                "company": "",
+                "filedDateFrom": "",
+                "filedDateTo": "",
+                "receivedDateFrom": "",
+                "receivedDateTo": "",
+                "pageSize": 50,
+                "pageNumber": 1,
+            },
+            timeout=30,
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        print(f"[warn] PUC docket fetch failed for {location} ({source['name']}): {e}")
+        return []
+
+    results = []
+    for item in (data.get("resultsItems") or []):
+        docket_id = item.get("docketId")
+        description = (item.get("description") or "").strip()
+        company = (item.get("companyName") or "").strip()
+        filed = item.get("filedDate") or ""
+        published_struct, published_str = None, ""
+        if filed:
+            try:
+                published_struct = time.strptime(filed[:10], "%Y-%m-%d")
+                published_str = filed[:10]
+            except ValueError:
+                pass
+        row_hash = hashlib.sha1(f"{docket_id}:{item.get('documentId')}".encode("utf-8")).hexdigest()[:12]
+        results.append({
+            "title": f"{source['name']}: docket {docket_id} — {description[:120]}",
+            "summary": f"{description} (filed by {company})"[:500] if company else description[:500],
+            "link": f"https://psc.ga.gov/facts-advanced-search/?docketId={docket_id}#{row_hash}",
+            "published": published_str,
+            "published_parsed": published_struct,
+            "source": {"title": source["name"]},
+        })
+    return results
+
+
+def fetch_puc_dockets(location):
+    """Dispatches to a per-state docket-filing scraper based on
+    PUC_DOCKET_SOURCES[location]["method"] — "nv_browse" (Nevada),
+    "nd_search" (North Dakota), or "ga_search" (Georgia); see the module
+    comment above for exactly what each does and how it was verified.
+    No-op (returns []) for any location without a registered source, or
+    (for the two entity-name-based methods) without at least one tracked
+    entity name to search for.
+
+    Returns entries shaped like every other fetch_* function (title,
+    summary, link, published, published_parsed, source) so they flow
+    through the exact same dedup/relevance/ledger pipeline as a news
+    article — a real regulatory filing is, if anything, a MORE primary
+    and credible source than ordinary press coverage, so this is wired
+    into the same main-alert-eligible local pipeline (fetch_local_news
+    etc.), not the lower-trust social/video digest."""
+    source = PUC_DOCKET_SOURCES.get(location)
+    if not source:
+        return []
+    method = source.get("method")
+    entity_names = PUC_ENTITY_NAMES.get(location, [])
+
+    if method == "nv_browse":
+        if not entity_names:
+            return []
+        return _puc_docket_nv_browse(location, source, entity_names)
+    elif method == "nd_search":
+        if not entity_names:
+            return []
+        return _puc_docket_nd_search(location, source, entity_names)
+    elif method == "ga_search":
+        return _puc_docket_ga_search(location, source)
+    else:
+        print(f"[warn] PUC docket source for {location} has unknown method {method!r}")
+        return []
 
 
 def _rotate(seq, offset):

@@ -135,39 +135,79 @@ Three layers of search, all feeding into a "Local / Site News" section:
 
    Most state docket-search systems are legacy ASP.NET WebForms apps that
    require simulating a form postback (`__doPostBack`/`__VIEWSTATE`) to
-   actually run a search — not reachable with a plain HTTP GET. Nevada's
-   PUCN is the one confirmed exception: its default docket-list page (no
-   search needed) renders the full current "Active Electric Dockets"
-   table server-side on a plain GET, so rather than simulate a search,
-   this treats that whole page as one more recall net (same spirit as
-   layer 5 above) and text-matches tracked entity names
-   (`PUC_ENTITY_NAMES`) against it directly — an entity name like "Reno
-   Power NR 1 LLC" is specific enough to stand alone as a match, unlike
-   `BASE_LOCAL_TERMS`'s generic words, so no separate anchor-term gate is
-   needed. A match's "link" points at the docket page itself with a
-   `#row-<hash>` fragment for stable-but-distinct dedup hashing, since a
-   real per-docket detail page isn't directly linkable without simulating
-   the site's own postback-based "View" action.
+   actually run a search — not reachable with a plain HTTP request. Three
+   states are now confirmed real, plain-HTTP-reachable exceptions, each
+   verified hands-on (live browser automation, not guessed) rather than
+   assumed from a static page read:
 
-   **Only Nevada is implemented.** The other 9 tracked states
-   (`PUC_DOCKET_SOURCES`'s comment has the detail) were checked at a
-   glance but none confirmed cleanly enough to build against without real
-   per-state verification: Texas (PUCT Interchange) has confirmed
+   - **Nevada PUCN** — its default docket-list page (no search needed)
+     renders the full current "Active Electric Dockets" table
+     server-side on a plain GET, so rather than simulate a search, this
+     treats that whole page as one more recall net (same spirit as layer
+     5 above) and text-matches tracked entity names (`PUC_ENTITY_NAMES`)
+     against it directly — an entity name like "Reno Power NR 1 LLC" is
+     specific enough to stand alone as a match, unlike
+     `BASE_LOCAL_TERMS`'s generic words, so no separate anchor-term gate
+     is needed. A match's "link" points at the docket page itself with a
+     `#row-<hash>` fragment for stable-but-distinct dedup hashing, since
+     a real per-docket detail page isn't directly linkable without
+     simulating the site's own postback-based "View" action.
+   - **North Dakota PSC** — confirmed to be a *plain HTML form POST*, not
+     an ASP.NET postback (no VIEWSTATE/CSRF token needed), to
+     `apps.psc.nd.gov/cases/pscasesearch` with an `entityName` field.
+     Posting `entityName="Applied Digital"` — the parent name already in
+     `BONDS`, no obscure subsidiary needed for this state — returned a
+     real, current case: "PU-26-155 Applied Digital Backup Generation,"
+     filed 2026.04.24. Case numbers look like `PU-26-155`; dates are
+     `YYYY.MM.DD`. Since the real results table's raw HTML wasn't
+     captured during verification, the response is flattened to text and
+     split on case-number boundaries as a best-effort per-case chunk,
+     same spirit as Nevada's row-matching.
+   - **Georgia PSC** — found, by inspecting the live "FACTS Advanced
+     Search" page's own network requests, a real underlying JSON API at
+     `psc.ga.gov/facts-advanced-search/document-filings-service/` (no
+     auth). Trial and error surfaced a sharp gotcha: every unused query
+     parameter must be an **empty string**, not the literal text
+     `"false"` — sending `"false"` silently returns
+     `{"resultsCount": null, "resultsItems": null}` for *any* query,
+     including ones with obvious real matches, which looks identical to
+     "nothing found" unless you catch it. Querying `description="data
+     center"` (company left empty, since Georgia Power alone files
+     thousands of unrelated dockets a year) returned a real, current hit:
+     a 2026-08-12 NRDC/SACE/Sierra Club joint letter on data center load
+     growth, filed under docket **44280** — Georgia Power's "Large Load"
+     tariff/contract docket. Unlike Nevada and North Dakota, Georgia's
+     results are *not* further filtered by per-site keywords
+     (`SITE_KEYWORDS`/`TENANT_KEYWORDS`): a state-level "Large Load"
+     policy docket like 44280 is material to every tracked Georgia site
+     whether or not it happens to name one specifically, so filtering
+     harder here would silently drop exactly the filings this layer
+     exists to catch.
+
+   **The other 6 tracked states are still not implemented** — checked
+   directly (not guessed) as of 2026-09-13, each still genuinely blocked
+   rather than just unexamined: Texas (PUCT Interchange) has confirmed
    GET-parameterized lookups by known docket/control number plus a
    separate "Daily Filing Search" page that may or may not work like
-   Nevada's discovery list; ERCOT's own site (checked directly, not just
-   guessed — its `/news` page and `/services/rq/large-load-integration`
-   page) turned out to be a landing-page hub with no feed, no downloadable
-   queue data, and no per-project large-load interconnection list — a
-   dead end for now, not a build target. Indiana (IURC) has a promising
-   "Weekly Filings" static list. Oklahoma (OCC) and New York (DPS/DMM)
-   confirmed need a postback or an already-known case number (would need
-   a headless browser). Georgia (PSC FACTS), North Dakota PSC, Illinois
-   Commerce Commission, North Carolina Utilities Commission, and Virginia
-   SCC are inconclusive either way. A wrong guess here is worse than no
-   coverage at all — a scraper quietly returning zero results every run
-   because the URL/structure is wrong is indistinguishable from "nothing
-   new," a false sense of coverage rather than an honest gap.
+   Nevada's discovery list, but WebFetch attempts on it were blocked and
+   it hasn't yet been retried via live browser automation; ERCOT's own
+   site (checked directly, not just guessed — its `/news` page and
+   `/services/rq/large-load-integration` page) turned out to be a
+   landing-page hub with no feed, no downloadable queue data, and no
+   per-project large-load interconnection list — a dead end for now, not
+   a build target. Indiana (IURC) has confirmed real weekly-filings PDFs
+   at predictable URLs with a real, parseable row format, but IURC
+   dockets are filed under the utility (Duke Energy Indiana / Hoosier
+   Energy), not the data center project itself, and no confirmed
+   project/tenant entity name has turned up yet to search for. Oklahoma
+   (OCC) and New York (DPS/DMM) confirmed need a postback or an
+   already-known case number (would need a headless browser). North
+   Carolina Utilities Commission and Virginia SCC were blocked on every
+   WebFetch attempt so far and haven't yet been retried via live browser
+   automation. A wrong guess here is worse than no coverage at all — a
+   scraper quietly returning zero results every run because the
+   URL/structure is wrong is indistinguishable from "nothing new," a
+   false sense of coverage rather than an honest gap.
 
    Also unconfirmed: **TRACTD's own PUC entity name.** It's the sibling
    Storey County bond at the same site as TRACTC, and almost certainly

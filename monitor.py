@@ -23,7 +23,7 @@ import socket
 import time
 import urllib.parse
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 
 import feedparser
@@ -271,6 +271,89 @@ SITE_KEYWORDS = {
     ],
 }
 
+# ---------------------------------------------------------------------------
+# Local TV news — YouTube layer (added 2026-09-09)
+#
+# Most of these sites are small towns/counties with no TV station of their
+# own; coverage actually comes from whichever media market (DMA) the county
+# sits in. Channel IDs below are each station's real YouTube "UC..." ID
+# (required for the free RSS feed — the @handle alone doesn't work), looked
+# up per-market and spot-checked against the live channel page before being
+# added here. Two markets needed real research rather than an obvious
+# guess: Dalton, GA and Marble, NC both sit in the Chattanooga, TN market
+# (not Atlanta or Asheville); Storey County, NV (the Tahoe-Reno Industrial
+# Center) is in the Reno, NV market, not a Bay Area or Vegas one.
+#
+# KNOWN GAP: New Lebanon, Sullivan County, IN is in the Terre Haute, IN
+# market (WTHI/WTWO) — neither station had a YouTube channel I could
+# confirm a real channel ID for (sparse/stale uploads, no verifiable
+# current channel page). Left empty rather than guessing; revisit if
+# either station's channel situation changes.
+LOCAL_TV_CHANNELS = {
+    "Ellendale, North Dakota": [
+        {"name": "WDAY-TV (Fargo)", "channel_id": "UCxxm1t7i-FihNV3DhqIaKvg"},
+        {"name": "KVLY / Valley News Live (Fargo)", "channel_id": "UCqDsOEMBTH8Ypk84vaKsKrA"},
+    ],
+    "Harwood, North Dakota": [
+        {"name": "WDAY-TV (Fargo)", "channel_id": "UCxxm1t7i-FihNV3DhqIaKvg"},
+        {"name": "KVLY / Valley News Live (Fargo)", "channel_id": "UCqDsOEMBTH8Ypk84vaKsKrA"},
+    ],
+    "Colorado City, Texas": [
+        {"name": "KTXS News (Abilene)", "channel_id": "UCpKFMw-X4vC3bR400lrgwSQ"},
+    ],
+    "Wink, Texas": [
+        {"name": "KWES / NewsWest 9 (Midland-Odessa)", "channel_id": "UC7sL-CtxlyCPeZ0Oj95kvDQ"},
+    ],
+    "Andrews, Texas": [
+        {"name": "KWES / NewsWest 9 (Midland-Odessa)", "channel_id": "UC7sL-CtxlyCPeZ0Oj95kvDQ"},
+    ],
+    "Denton, Texas": [
+        {"name": "WFAA (Dallas-Fort Worth)", "channel_id": "UCBu0KdNokE4MqdkacvH37_A"},
+    ],
+    "Dalton, Georgia": [
+        {"name": "WRCB / Local 3 News (Chattanooga)", "channel_id": "UCZvWI9aiyzMp-osh-XbU7xA"},
+    ],
+    "Muskogee, Oklahoma": [
+        {"name": "KJRH / 2 News Oklahoma (Tulsa)", "channel_id": "UChrpaYlmaVsVyEF0bTqmuHw"},
+    ],
+    "Marble, North Carolina": [
+        {"name": "WRCB / Local 3 News (Chattanooga)", "channel_id": "UCZvWI9aiyzMp-osh-XbU7xA"},
+    ],
+    "Austin, Texas": [
+        {"name": "KXAN (Austin)", "channel_id": "UCgBVz3EzHYKpPS0BITvLRsg"},
+    ],
+    "Atlanta, Georgia": [
+        {"name": "WSB-TV (Atlanta)", "channel_id": "UCPsSnSR7ymSE8on3wafNbqg"},
+        {"name": "11Alive / WXIA (Atlanta)", "channel_id": "UCzF4Ryn8TKn64md77gS5Q5Q"},
+    ],
+    "Chicago, Illinois": [
+        {"name": "ABC7 Chicago / WLS", "channel_id": "UC_vFLohxs5PkAxlk7Y6jEtw"},
+    ],
+    "Dickens County, Texas": [
+        {"name": "KCBD NewsChannel 11 (Lubbock)", "channel_id": "UC17gluxscT-K2IJG2oxz4uA"},
+    ],
+    # See KNOWN GAP note above — no confirmed channel for this market.
+    "New Lebanon, Sullivan County, Indiana": [],
+    "Elk Grove Village, Illinois": [
+        {"name": "ABC7 Chicago / WLS", "channel_id": "UC_vFLohxs5PkAxlk7Y6jEtw"},
+    ],
+    "Storey County, Nevada": [
+        {"name": "KOLO 8 News Now (Reno)", "channel_id": "UC7F_N64LZ5NgUP3Xf1u1qfA"},
+    ],
+    "Barker, New York": [
+        {"name": "WGRZ (Buffalo)", "channel_id": "UCarpqAWmTDGkYyJj5syhAxA"},
+    ],
+    "Abernathy, Texas": [
+        {"name": "KCBD NewsChannel 11 (Lubbock)", "channel_id": "UC17gluxscT-K2IJG2oxz4uA"},
+    ],
+    "Loudoun County, Virginia": [
+        {"name": "WUSA9 (Washington, DC)", "channel_id": "UCcT6w3xUyVshyR2_2vrMp1w"},
+    ],
+    "Okmulgee, Oklahoma": [
+        {"name": "KJRH / 2 News Oklahoma (Tulsa)", "channel_id": "UChrpaYlmaVsVyEF0bTqmuHw"},
+    ],
+}
+
 # Additional curated feeds beyond Nevada Independent, mostly nonprofit
 # statehouse/regional outlets (States Newsroom network + similar) that
 # cover energy/utility and data-center-development stories closely.
@@ -412,6 +495,22 @@ XAI_MODEL = os.environ.get("XAI_MODEL", "grok-4-1-fast").strip()
 OPENAI_API_KEY = "".join(os.environ.get("OPENAI_API_KEY", "").split())
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5-mini").strip()
 
+# Optional — enables the YouTube keyword-search layer (see
+# fetch_youtube_search). The per-channel RSS layer (fetch_youtube_channel_
+# uploads) needs no key at all and always runs regardless of this. If unset,
+# search.list is simply skipped — RSS-only is a fully functional mode, not
+# a degraded one, just narrower (curated channels only, no open recall).
+YOUTUBE_API_KEY = "".join(os.environ.get("YOUTUBE_API_KEY", "").split())
+# Self-imposed ceiling, deliberately below YouTube's real 10,000 unit/day
+# free quota (search.list costs 100 units/call — Google's published rate as
+# of Sep 2026) to leave headroom rather than run right up to the edge of a
+# shared project-wide quota. Exceeding the REAL quota just gets you a 403
+# quotaExceeded response (no surprise billing — this API has no pay-per-
+# overage tier), but that failure mode would silently affect every OTHER
+# YouTube API use on the same project too, not just this script.
+YOUTUBE_DAILY_QUOTA_BUDGET = int(os.environ.get("YOUTUBE_DAILY_QUOTA_BUDGET", "9000"))
+YOUTUBE_SEARCH_LIST_COST = 100
+
 
 def _check_ascii(name, value):
     try:
@@ -432,6 +531,8 @@ if XAI_API_KEY:
     _check_ascii("XAI_API_KEY", XAI_API_KEY)
 if OPENAI_API_KEY:
     _check_ascii("OPENAI_API_KEY", OPENAI_API_KEY)
+if YOUTUBE_API_KEY:
+    _check_ascii("YOUTUBE_API_KEY", YOUTUBE_API_KEY)
 
 # Comma-separated list of recipients, e.g. "a@example.com,b@example.com"
 ALERT_EMAIL_TO = [
@@ -460,6 +561,18 @@ REVIEW_EMAIL_TO = [
 CROSS_MODEL_REPORT_EMAIL_TO = [
     addr.strip()
     for addr in os.environ.get("CROSS_MODEL_REPORT_EMAIL_TO", ",".join(REVIEW_EMAIL_TO)).split(",")
+    if addr.strip()
+]
+
+# Recipients for the social/video digest (see build_social_email). Defaults
+# to REVIEW_EMAIL_TO for the same reason REVIEW_EMAIL_TO itself defaults
+# narrow — this is a QC/monitoring tool, not something the full
+# distribution needs cluttering their inbox with, and video/social content
+# is explicitly never allowed into the main alert regardless of how it
+# scores (see the note in _log_and_route_social).
+SOCIAL_EMAIL_TO = [
+    addr.strip()
+    for addr in os.environ.get("SOCIAL_EMAIL_TO", ",".join(REVIEW_EMAIL_TO)).split(",")
     if addr.strip()
 ]
 
@@ -605,12 +718,18 @@ def save_ledger(ledger):
         json.dump(ledger, f, indent=2)
 
 
-def record_ledger_event(ledger, context_type, group_label, tickers, verdict, article_hash):
+def record_ledger_event(ledger, context_type, group_label, tickers, verdict, article_hash, medium="article"):
     """Appends a confirmed (on_topic AND primary_incremental) event to the
     ledger — see the module-level comment above for why that's the bar,
     not strict_relevant. Idempotent: keyed on the same article hash used
     for seen-dedup, so re-processing the same seen entry (shouldn't happen
-    in normal operation, but cheap to guard against) never double-records."""
+    in normal operation, but cheap to guard against) never double-records.
+
+    medium distinguishes what kind of source reported this — "article"
+    (the original, still-default case) or "video" (local TV/YouTube — see
+    _log_and_route_social) — so the ledger reads as one merged site/credit
+    history regardless of source type, while still letting a human filter
+    by medium later if that turns out to matter."""
     if not (verdict.get("on_topic") and verdict.get("primary_incremental")):
         return
     entry = verdict["entry"]
@@ -627,6 +746,7 @@ def record_ledger_event(ledger, context_type, group_label, tickers, verdict, art
         "source": _entry_source_name(entry),
         "tickers": tickers,
         "context_type": context_type,
+        "medium": medium,
         "market_moving": bool(verdict.get("market_moving")),
         "reached_main_alert": bool(verdict.get("strict_relevant")),
         "analysis": verdict.get("analysis", ""),
@@ -891,6 +1011,348 @@ def fetch_raw_location_news(location):
 
 
 # ---------------------------------------------------------------------------
+# YouTube — local TV channel RSS + keyword search (added 2026-09-09)
+#
+# Two independent layers, same split as the news side: a free, keyless,
+# quota-free per-channel RSS poll (LOCAL_TV_CHANNELS — the primary layer,
+# always on) and a paid-quota keyword search across all of YouTube
+# (fetch_youtube_search — the recall backstop for channels we haven't
+# curated, gated behind YOUTUBE_API_KEY and a self-imposed daily budget).
+#
+# Deliberately LOCAL-ONLY, not corporate: this project's own thesis is that
+# site-level news is the more decision-relevant signal (see README), and
+# the search layer's quota is scarce enough (10,000 free units/day,
+# 100/call) that spending it on all 19 site locations already means it
+# can't run every single hourly cycle — adding 12 more corporate queries
+# would roughly double the quota burn for a category this repo already
+# treats as the lower-priority, higher-bar one everywhere else.
+#
+# NEITHER layer feeds the main alert directly — see _log_and_route_social
+# in main(): every video candidate goes through the exact same Claude
+# relevance scoring as articles, but is routed to a dedicated social/video
+# digest instead, never the main alert, regardless of how it scores. This
+# was an explicit design choice: video/social content is less vetted than
+# wire/outlet news, so it gets the same judgment applied but a lower ceiling
+# on where it can land.
+def _normalize_youtube_entry(entry, source_name):
+    """Feedparser's Atom+media-namespace parsing puts a video's description
+    under `media_description`, not the `summary` field every other function
+    in this pipeline (assess_relevance, email rendering) reads — copy it
+    over so a video entry is a drop-in match for the same dict-like shape a
+    Google News RSS entry already has. Also stamps a synthetic 'source'
+    dict, since YouTube entries have no Google News style ' - Source Name'
+    suffix for _entry_source_name to parse out of the title."""
+    if not entry.get("summary"):
+        entry["summary"] = entry.get("media_description", "") or ""
+    entry["source"] = {"title": source_name}
+    return entry
+
+
+def fetch_youtube_channel_uploads(location):
+    """Poll each local TV station's free, keyless YouTube RSS feed
+    (LOCAL_TV_CHANNELS) for this site. A general-market news station
+    uploads dozens of unrelated segments a day (weather, sports, crime), so
+    — mirroring fetch_curated_entries' anchor+specific gating, not the
+    looser BASE_LOCAL_TERMS-alone match fetch_local_news uses against a
+    targeted Google search query — this requires BOTH a data-center anchor
+    term AND a specific identifier (the site's own name/widened location
+    phrase, or one of its SITE_KEYWORDS/TENANT_KEYWORDS) before a video is
+    even considered a candidate. A bare BASE_LOCAL_TERMS word like
+    "permit" or "electricity" alone is far too weak a filter against an
+    entire market's daily upload firehose, unlike in a targeted search
+    query where it's combined with the location at the query level."""
+    channels = LOCAL_TV_CHANNELS.get(location, [])
+    if not channels:
+        return []
+    anchor_terms = ["data center", "datacenter", "compute", "hyperscale"]
+    specific_terms = [
+        t.lower() for t in (
+            _location_query_terms(location) + SITE_KEYWORDS.get(location, [])
+            + TENANT_KEYWORDS.get(location, [])
+        )
+    ]
+    results = []
+    for ch in channels:
+        url = f"https://www.youtube.com/feeds/videos.xml?channel_id={ch['channel_id']}"
+        try:
+            feed = feedparser.parse(url)
+        except Exception as e:
+            print(f"[warn] YouTube RSS fetch failed for {ch['name']} ({location}): {e}")
+            continue
+        for entry in feed.entries:
+            _normalize_youtube_entry(entry, f"{ch['name']} (YouTube)")
+            haystack = (entry.get("title", "") + " " + entry.get("summary", "")).lower()
+            has_anchor = any(a in haystack for a in anchor_terms)
+            has_specific = any(s in haystack for s in specific_terms)
+            if has_anchor and has_specific:
+                results.append(entry)
+    return results
+
+
+YOUTUBE_SEARCH_URL = "https://www.googleapis.com/youtube/v3/search"
+YOUTUBE_QUOTA_STATE_FILE = os.environ.get(
+    "YOUTUBE_QUOTA_STATE_FILE_PATH",
+    os.path.join(os.path.dirname(SEEN_FILE), "youtube_quota.json") if os.path.dirname(SEEN_FILE) else "youtube_quota.json",
+)
+
+
+def _load_youtube_quota():
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    data = {}
+    if os.path.exists(YOUTUBE_QUOTA_STATE_FILE):
+        try:
+            with open(YOUTUBE_QUOTA_STATE_FILE, "r") as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            data = {}
+    if data.get("date") != today:
+        data = {"date": today, "used": 0}
+    return data
+
+
+def _save_youtube_quota(data):
+    parent_dir = os.path.dirname(YOUTUBE_QUOTA_STATE_FILE)
+    if parent_dir and not os.path.isdir(parent_dir):
+        try:
+            os.makedirs(parent_dir, exist_ok=True)
+        except OSError as e:
+            print(f"[warn] could not create directory for YOUTUBE_QUOTA_STATE_FILE_PATH ({parent_dir}): {e}")
+    with open(YOUTUBE_QUOTA_STATE_FILE, "w") as f:
+        json.dump(data, f)
+
+
+def fetch_youtube_search(query_text):
+    """Keyword search across ALL of YouTube via the paid-quota search.list
+    endpoint — the recall backstop for videos from channels we haven't
+    curated (independent finance/tech YouTubers, a company's own channel,
+    smaller outlets outside LOCAL_TV_CHANNELS). No-op if YOUTUBE_API_KEY
+    isn't set.
+
+    Costs YOUTUBE_SEARCH_LIST_COST (100) quota units per call against a
+    10,000-unit/day free allowance — exceeding it just gets a 403
+    quotaExceeded response (no billing kicks in), so a bug here fails
+    safe, not expensive. Still self-limits against a persisted daily
+    budget (YOUTUBE_DAILY_QUOTA_BUDGET, default 9000) rather than the real
+    quota, since hitting the actual ceiling would also break any other
+    unrelated use of the same API key/project that day."""
+    if not YOUTUBE_API_KEY:
+        return []
+    quota = _load_youtube_quota()
+    if quota["used"] + YOUTUBE_SEARCH_LIST_COST > YOUTUBE_DAILY_QUOTA_BUDGET:
+        print(f'    [youtube search] skipped "{query_text}" — daily quota budget '
+              f"({YOUTUBE_DAILY_QUOTA_BUDGET} units) would be exceeded "
+              f"({quota['used']} used so far today)")
+        return []
+    published_after = (datetime.now(timezone.utc) - timedelta(days=MAX_ARTICLE_AGE_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        resp = requests.get(
+            YOUTUBE_SEARCH_URL,
+            params={
+                "part": "snippet",
+                "q": query_text,
+                "type": "video",
+                "order": "date",
+                "maxResults": 10,
+                "publishedAfter": published_after,
+                "key": YOUTUBE_API_KEY,
+            },
+            timeout=30,
+        )
+        quota["used"] += YOUTUBE_SEARCH_LIST_COST
+        _save_youtube_quota(quota)
+        resp.raise_for_status()
+        items = resp.json().get("items", [])
+    except Exception as e:
+        print(f'[warn] YouTube search.list failed for "{query_text}": {e}')
+        return []
+
+    results = []
+    for item in items:
+        video_id = item.get("id", {}).get("videoId")
+        if not video_id:
+            continue
+        snippet = item.get("snippet", {})
+        published_at = snippet.get("publishedAt", "")
+        try:
+            published_struct = time.strptime(published_at, "%Y-%m-%dT%H:%M:%SZ")
+        except ValueError:
+            published_struct = None
+        entry = {
+            "title": snippet.get("title", "Untitled"),
+            "summary": snippet.get("description", ""),
+            "link": f"https://www.youtube.com/watch?v={video_id}",
+            "published": published_at,
+            "published_parsed": published_struct,
+        }
+        _normalize_youtube_entry(entry, f"{snippet.get('channelTitle', 'YouTube')} (YouTube search)")
+        results.append(entry)
+    return results
+
+
+# ---------------------------------------------------------------------------
+# State PUC / PSC docket filings (added 2026-09-13)
+#
+# A real interconnection/service-agreement filing at a state utility
+# regulator often uses a DIFFERENT entity name than the bond's own
+# issuing-entity name in BONDS — e.g. TRACTC's actual Nevada PUC filer is
+# "Reno Power NR 1 LLC", not "Tract Capital/Fleet Data Centers - SV RNO
+# Property Owner 1, LLC" (its bond-issuer name in BONDS) or anything
+# already in SITE_KEYWORDS. A real filing under this name was missed
+# entirely around 2026-09-05 — none of the existing layers search a state
+# PUC's own docket system at all, and this project-specific filer name
+# doesn't surface in ordinary news coverage either.
+#
+# Most state docket-search systems are legacy ASP.NET WebForms apps that
+# require simulating a postback (__doPostBack / __VIEWSTATE) to actually
+# RUN a search — not reachable with a plain HTTP GET. Nevada's PUCN
+# (pucweb1.state.nv.us) is the one confirmed exception found so far: its
+# default docket-LIST page (no search needed) renders the full current
+# "Active Electric Dockets" table server-side on a plain GET — only its
+# per-row "View" detail action needs a postback, which this doesn't use.
+# So rather than simulate a search, this treats the whole default-view
+# page as one big recall net (in the same spirit as
+# fetch_raw_location_news) and text-matches tracked entity names against
+# it directly.
+#
+# ONLY NEVADA IS IMPLEMENTED. The other 9 tracked states were checked at a
+# glance (2026-09-13) but none confirmed cleanly enough to build against
+# without real per-state verification first — see PUC_DOCKET_SOURCES'
+# comment below for what's known about each. Building against an unverified
+# guess here is worse than not building it at all: a scraper that quietly
+# returns zero results every run because the URL/structure is wrong looks
+# identical to "nothing new to report," which is a false sense of coverage.
+PUC_ENTITY_NAMES = {
+    "Storey County, Nevada": ["Reno Power NR 1 LLC"],
+    # TRACTD (the sibling Storey County bond, same site) almost certainly
+    # files under its own distinct entity name too — plausibly a "Reno
+    # Power NR <n> LLC" sibling to TRACTC's — but I couldn't confirm the
+    # actual name well enough to add it here without guessing. Worth
+    # checking the TRACTD OM's interconnection agreement, or the NV PUC
+    # active-dockets list directly for other "Reno Power" filers.
+}
+
+PUC_DOCKET_SOURCES = {
+    "Storey County, Nevada": {
+        "name": "Nevada PUC (PUCN) — active electric dockets",
+        "url": "https://pucweb1.state.nv.us/puc2/DktInfo.aspx?Util=Electric&AspxAutoDetectCookieSupport=1",
+    },
+    # NOT YET IMPLEMENTED for the other tracked states — one-glance
+    # research findings as of 2026-09-13, each needs real hands-on
+    # verification (not guesswork) before adding a URL here:
+    #   - Texas (PUCT Interchange) — confirmed real GET-parameterized
+    #     docket lookups by known control number, plus a separate "Daily
+    #     Filing Search" page that MAY list new filings without already
+    #     knowing a control number (i.e. a Nevada-style discovery list) —
+    #     not verified closely enough yet. Covers Colorado City, Wink,
+    #     Andrews, Denton, Austin, Abernathy.
+    #   - Indiana (IURC) — has a "Weekly Filings" page that looked like a
+    #     plain static list of newly-filed documents, no search needed —
+    #     promising but not verified closely enough yet. Covers New
+    #     Lebanon/Sullivan County.
+    #   - Oklahoma (OCC) and New York (DPS/DMM) — confirmed to need a
+    #     postback or an already-known case number for discovery search
+    #     (Oracle APEX session-based app for OK; classic ASP.NET
+    #     __doPostBack for NY) — would need a headless browser, not a
+    #     plain scraper like this one. Covers Muskogee/Okmulgee (OK) and
+    #     Barker (NY).
+    #   - Georgia (PSC FACTS), North Dakota PSC, Illinois Commerce
+    #     Commission, North Carolina Utilities Commission, and Virginia
+    #     SCC — inconclusive, not confirmed scrapable OR unscrapable.
+    #     Covers Ellendale/Harwood (ND), Dalton/Atlanta (GA),
+    #     Marble (NC), Chicago/Elk Grove Village (IL), Loudoun County (VA).
+}
+
+
+def fetch_puc_dockets(location):
+    """Treats a state PUC's plain-GET default docket listing as one big
+    recall net (no search/postback simulated) and text-matches tracked
+    entity names (PUC_ENTITY_NAMES) against it directly. Unlike
+    BASE_LOCAL_TERMS's generic words, an entity name like "Reno Power NR 1
+    LLC" is specific enough to stand alone as a match — no separate
+    anchor-term gate needed. No-op (returns []) for any location without
+    both a registered source AND at least one entity name to search for —
+    see the module comment above for why only Nevada has both right now.
+
+    Returns entries shaped like every other fetch_* function (title,
+    summary, link, published, published_parsed, source) so they flow
+    through the exact same dedup/relevance/ledger pipeline as a news
+    article — a real regulatory filing is, if anything, a MORE primary
+    and credible source than ordinary press coverage, so this is wired
+    into the same main-alert-eligible local pipeline (fetch_local_news
+    etc.), not the lower-trust social/video digest.
+
+    Each candidate's "link" is the docket page's own URL with a unique
+    #row-<hash> fragment appended — a real per-docket detail page isn't
+    directly linkable without simulating the postback the site's own
+    "View" action uses, so this points at the same search page every
+    time but keeps dedup hashing (article_key hashes on link) stable per
+    distinct row content rather than colliding all matches from a state
+    onto one hash."""
+    source = PUC_DOCKET_SOURCES.get(location)
+    entity_names = PUC_ENTITY_NAMES.get(location, [])
+    if not source or not entity_names:
+        return []
+    try:
+        resp = requests.get(source["url"], timeout=30, headers={"User-Agent": "Mozilla/5.0"})
+        resp.raise_for_status()
+        html = resp.text
+    except Exception as e:
+        print(f"[warn] PUC docket fetch failed for {location} ({source['name']}): {e}")
+        return []
+
+    # Coarse row-boundary preservation: turn common row/cell/line-break
+    # HTML boundaries into whitespace BEFORE stripping the remaining tags,
+    # so a table row's cells (docket #, date, description) mostly stay
+    # together on one flattened line instead of all running into a single
+    # undifferentiated blob of page text.
+    text = re.sub(r'(?i)</tr>|<br\s*/?>', '\n', html)
+    text = re.sub(r'(?i)</td>|</th>', '\t', text)
+    text = re.sub(r'<[^>]+>', '', text)
+    text = text.replace('&nbsp;', ' ').replace('&amp;', '&')
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+
+    results = []
+    for line in lines:
+        matched = [name for name in entity_names if name.lower() in line.lower()]
+        if not matched:
+            continue
+        row_hash = hashlib.sha1(line.encode("utf-8")).hexdigest()[:12]
+        # Best-effort date extraction (M/D/YYYY) — if this doesn't find a
+        # date, published_parsed is left unset, which _is_recent_enough
+        # already treats as "no date info available — don't drop, can't
+        # confirm either way" rather than wrongly filtering it out.
+        date_match = re.search(r'\b(\d{1,2}/\d{1,2}/\d{4})\b', line)
+        published_struct, published_str = None, ""
+        if date_match:
+            try:
+                published_struct = time.strptime(date_match.group(1), "%m/%d/%Y")
+                published_str = date_match.group(1)
+            except ValueError:
+                pass
+        results.append({
+            "title": f"{source['name']}: docket mentioning {matched[0]}",
+            "summary": line[:500],
+            "link": f"{source['url']}#row-{row_hash}",
+            "published": published_str,
+            "published_parsed": published_struct,
+            "source": {"title": source["name"]},
+        })
+    return results
+
+
+def _rotate(seq, offset):
+    """Rotates a list by offset so a budget-limited loop doesn't always
+    starve the same tail-end items when it runs out partway through — used
+    to spread YouTube search quota roughly evenly across locations over a
+    day of hourly runs rather than always favoring whichever location
+    happens to iterate first."""
+    if not seq:
+        return seq
+    offset %= len(seq)
+    return seq[offset:] + seq[:offset]
+
+
+# ---------------------------------------------------------------------------
 # Email
 # ---------------------------------------------------------------------------
 def _render_items_html(items):
@@ -939,6 +1401,52 @@ def build_email(new_corporate, new_local, subject_prefix="HY Datacenter News Ale
         html_parts.append("<h2>Local / Site News</h2>")
         text_parts.append("\n=== LOCAL / SITE NEWS ===")
         for location, items in new_local.items():
+            tickers = ", ".join(LOCATION_GROUPS[location])
+            html_parts.append(f"<h3>{location} ({tickers})</h3>")
+            html_parts.append(_render_items_html(items))
+            text_parts.append(f"\n{location} ({tickers})")
+            text_parts.append(_render_items_text(items))
+
+    html = f"<html><body>{''.join(html_parts)}</body></html>"
+    text = "\n".join(text_parts)
+
+    return {"subject": subject, "html": html, "text": text}
+
+
+def build_social_email(new_corporate_video, new_local_video):
+    """Digest for on-topic video/social candidates (currently: local TV
+    station uploads + YouTube keyword search — see _log_and_route_social
+    in main()). Structurally mirrors build_email, but nothing here EVER
+    reached the main alert regardless of how it scored — that's the whole
+    point of this being a separate email — so each item's note says
+    whether it would have cleared the strict main-alert bar on its own,
+    for a human reader's judgment rather than the pipeline's."""
+    total = sum(len(v) for v in new_corporate_video.values()) + sum(len(v) for v in new_local_video.values())
+    subject = f"HY Datacenter News — Social/Video Digest — {total} new item{'s' if total != 1 else ''}"
+
+    html_parts = [
+        "<p>On-topic video coverage (local TV stations, YouTube search) for tracked "
+        "HY datacenter bonds. This never reaches the main alert regardless of how it "
+        "scores — video/social content is treated as less vetted than wire/outlet "
+        "news — but a note flags anything that would have cleared the strict "
+        f"main-alert bar on its own (last {LOOKBACK_WINDOW}):</p>"
+    ]
+    text_parts = ["On-topic video coverage — never sent to the main alert (see note above):"]
+
+    if new_corporate_video:
+        html_parts.append("<h2>Corporate</h2>")
+        text_parts.append("\n=== CORPORATE (VIDEO) ===")
+        for parent, items in new_corporate_video.items():
+            tickers = ", ".join(PARENT_GROUPS[parent])
+            html_parts.append(f"<h3>{parent} ({tickers})</h3>")
+            html_parts.append(_render_items_html(items))
+            text_parts.append(f"\n{parent} ({tickers})")
+            text_parts.append(_render_items_text(items))
+
+    if new_local_video:
+        html_parts.append("<h2>Local / Site</h2>")
+        text_parts.append("\n=== LOCAL / SITE (VIDEO) ===")
+        for location, items in new_local_video.items():
             tickers = ", ".join(LOCATION_GROUPS[location])
             html_parts.append(f"<h3>{location} ({tickers})</h3>")
             html_parts.append(_render_items_html(items))
@@ -1545,7 +2053,8 @@ def main():
 
     print(f"[{datetime.now(timezone.utc).isoformat()}] Starting run: "
           f"{len(PARENT_GROUPS)} corporate + {len(LOCATION_GROUPS)} local queries "
-          f"(plus site-specific + curated feeds per location)")
+          f"(plus site-specific + curated feeds per location, "
+          f"local TV YouTube RSS{' + YouTube search' if YOUTUBE_API_KEY else ''})")
     seen = load_seen()
     ledger = load_ledger()
     seen_titles = {
@@ -1588,10 +2097,46 @@ def main():
         except Exception as e:
             print(f"[warn] raw location fetch failed for {location}: {e}")
         entries += fetch_curated_entries(location)
+        try:
+            entries += fetch_puc_dockets(location)
+        except Exception as e:
+            print(f"[warn] PUC docket fetch failed for {location}: {e}")
         fresh = _dedupe_fresh(entries, seen, seen_titles, f"local:{location}")
         if fresh:
             new_local[location] = fresh
         time.sleep(REQUEST_DELAY_SECONDS)
+
+    # YouTube — local TV channel RSS (free, always runs) + keyword search
+    # (paid-quota, only if YOUTUBE_API_KEY is set). See the module-level
+    # comment above fetch_youtube_channel_uploads for why this is local-only
+    # and never touches the main alert. Uses the same `seen`/`seen_titles`
+    # structures as the loops above, so a video covering a story an article
+    # already surfaced this run gets caught by the same fuzzy-title dedup.
+    new_local_video = {}
+    for i, location in enumerate(LOCATION_GROUPS, 1):
+        print(f"  [{i}/{len(LOCATION_GROUPS)}] local video (RSS): {location}")
+        try:
+            entries = fetch_youtube_channel_uploads(location)
+        except Exception as e:
+            print(f"[warn] YouTube channel fetch failed for {location}: {e}")
+            entries = []
+        fresh = _dedupe_fresh(entries, seen, seen_titles, f"local-video:{location}")
+        if fresh:
+            new_local_video[location] = fresh
+
+    if YOUTUBE_API_KEY:
+        # Rotate the starting location by UTC hour so a budget cutoff
+        # doesn't always starve the same tail-end locations run after run.
+        rotated_locations = _rotate(list(LOCATION_GROUPS.keys()), datetime.now(timezone.utc).hour)
+        for location in rotated_locations:
+            try:
+                entries = fetch_youtube_search(f"{location} data center")
+            except Exception as e:
+                print(f"[warn] YouTube search failed for {location}: {e}")
+                entries = []
+            fresh = _dedupe_fresh(entries, seen, seen_titles, f"local-video:{location}")
+            if fresh:
+                new_local_video.setdefault(location, []).extend(fresh)
 
     seen = trim_seen(seen)
 
@@ -1599,6 +2144,7 @@ def main():
 
     strict_corporate, strict_local = {}, {}
     broad_corporate, broad_local = {}, {}  # on-topic but excluded from strict — for QC review only
+    social_local = {}  # on-topic video/social — NEVER promoted to the main alert, see _log_and_route_social
     disagreement_records = []  # cross-model audit only, never gates the real emails
 
     def _log_split_and_record(verdicts, tag, context_type, group_label, tickers):
@@ -1630,6 +2176,46 @@ def main():
             # different, and deliberately lower, bar than strict_relevant).
             record_ledger_event(ledger, context_type, group_label, tickers, v, key)
         return strict_items, broad_extra_items
+
+    def _log_and_route_social(verdicts, context_type, group_label, tickers, medium):
+        """Runs video/social candidates through the exact same relevance
+        scoring as articles, but routes the result differently — an
+        explicit design decision (not an oversight) that this medium is
+        noisier/less vetted than wire news, so NOTHING from it is ever
+        allowed to reach the main alert, even an item that scores
+        strict_relevant. Every on_topic (broad_relevant) item instead goes
+        to the social/video digest, annotated with whether it would have
+        cleared the strict bar on its own — still useful signal for a
+        human, just not enough by itself from an unvetted medium.
+
+        Also writes seen[key]["strict_relevant"] = False unconditionally
+        (never the verdict's real value) — a video was never in the main
+        alert, so it must never count as "already sent in the main alert"
+        for a future article's cross-run dedup context
+        (_recent_alerted_context filters on exactly that field).
+
+        Still qualifies for the durable ledger on the same on_topic AND
+        primary_incremental bar as articles — a real confirmed development
+        is worth recording regardless of which medium first reported it."""
+        social_items = []
+        for v in verdicts:
+            title = v["entry"].get("title", "Untitled")
+            link = v["entry"].get("link", "")
+            log_tag = "would-alert" if v["strict_relevant"] else ("on-topic" if v["broad_relevant"] else "rejected")
+            print(f"    [social:{log_tag}] {title}")
+            print(f"           {link}")
+            print(f"           reason: {v['analysis']}")
+            if v["broad_relevant"]:
+                note = v["analysis"]
+                if v["strict_relevant"]:
+                    note = f"[would have cleared the main-alert bar] {note}"
+                social_items.append((v["entry"], note))
+            key = article_key(v["entry"])
+            if key in seen:
+                seen[key]["strict_relevant"] = False
+                seen[key]["analysis"] = v["analysis"]
+            record_ledger_event(ledger, context_type, group_label, tickers, v, key, medium=medium)
+        return social_items
 
     for parent in list(new_corporate.keys()):
         entries = new_corporate[parent]
@@ -1663,6 +2249,23 @@ def main():
         if broad_extra_items:
             broad_local[location] = broad_extra_items
 
+    for location in list(new_local_video.keys()):
+        entries = new_local_video[location]
+        print(f"  assessing local video: {location} ({len(entries)} candidate(s))")
+        # Reuses the SAME "already sent in the main alert" context articles
+        # use (tag "local:{location}") — a TV segment simply covering a
+        # story that already went out in the main alert should score
+        # primary_incremental=false, same as a rehash article would.
+        prior_titles = _recent_alerted_context(seen, f"local:{location}")
+        verdicts = assess_relevance(location, LOCATION_GROUPS[location], entries, context_type="local",
+                                     previously_alerted_titles=prior_titles)
+        verdicts, records = cross_model_disagreement_report(
+            location, LOCATION_GROUPS[location], entries, "local", verdicts, previously_alerted_titles=prior_titles)
+        disagreement_records.extend(records)
+        social_items = _log_and_route_social(verdicts, "local", location, LOCATION_GROUPS[location], medium="video")
+        if social_items:
+            social_local[location] = social_items
+
     save_seen(seen)
     save_ledger(ledger)
 
@@ -1685,6 +2288,14 @@ def main():
         print(f"[{datetime.now(timezone.utc).isoformat()}] Sent review digest with {total} excluded-but-on-topic item(s) to {REVIEW_EMAIL_TO}.")
     else:
         print(f"[{datetime.now(timezone.utc).isoformat()}] No excluded-but-on-topic items for the review digest this run.")
+
+    if social_local:
+        social_msg = build_social_email({}, social_local)
+        send_email(social_msg, recipients=SOCIAL_EMAIL_TO)
+        total = sum(len(v) for v in social_local.values())
+        print(f"[{datetime.now(timezone.utc).isoformat()}] Sent social/video digest with {total} on-topic item(s) to {SOCIAL_EMAIL_TO}.")
+    else:
+        print(f"[{datetime.now(timezone.utc).isoformat()}] No on-topic video items for the social digest this run.")
 
     if disagreement_records:
         disagreement_msg = build_disagreement_email(disagreement_records)

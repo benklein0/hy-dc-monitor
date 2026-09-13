@@ -122,7 +122,67 @@ Three layers of search, all feeding into a "Local / Site News" section:
    articles straight into the main alert; see the batching and fail-open
    fixes below for the general-purpose backstops, and this exclusion for
    removing the risk at the source for known-bad locations.
-6. **Relevance + impact analysis (Claude)** — the five layers above are a
+
+6. **State PUC/PSC docket filings** (`fetch_puc_dockets`, added
+   2026-09-13) — a real interconnection/service-agreement filing at a
+   state utility regulator often uses a DIFFERENT entity name than the
+   bond's own issuing-entity name in `BONDS`: TRACTC's actual Nevada PUC
+   filer is "Reno Power NR 1 LLC", not "...SV RNO Property Owner 1, LLC"
+   (its bond-issuer name) or anything already in `SITE_KEYWORDS` — and a
+   real filing under that name was missed entirely around 2026-09-05,
+   since none of the layers above search a state PUC's own docket system
+   at all.
+
+   Most state docket-search systems are legacy ASP.NET WebForms apps that
+   require simulating a form postback (`__doPostBack`/`__VIEWSTATE`) to
+   actually run a search — not reachable with a plain HTTP GET. Nevada's
+   PUCN is the one confirmed exception: its default docket-list page (no
+   search needed) renders the full current "Active Electric Dockets"
+   table server-side on a plain GET, so rather than simulate a search,
+   this treats that whole page as one more recall net (same spirit as
+   layer 5 above) and text-matches tracked entity names
+   (`PUC_ENTITY_NAMES`) against it directly — an entity name like "Reno
+   Power NR 1 LLC" is specific enough to stand alone as a match, unlike
+   `BASE_LOCAL_TERMS`'s generic words, so no separate anchor-term gate is
+   needed. A match's "link" points at the docket page itself with a
+   `#row-<hash>` fragment for stable-but-distinct dedup hashing, since a
+   real per-docket detail page isn't directly linkable without simulating
+   the site's own postback-based "View" action.
+
+   **Only Nevada is implemented.** The other 9 tracked states
+   (`PUC_DOCKET_SOURCES`'s comment has the detail) were checked at a
+   glance but none confirmed cleanly enough to build against without real
+   per-state verification: Texas (PUCT Interchange) has confirmed
+   GET-parameterized lookups by known docket/control number plus a
+   separate "Daily Filing Search" page that may or may not work like
+   Nevada's discovery list; ERCOT's own site (checked directly, not just
+   guessed — its `/news` page and `/services/rq/large-load-integration`
+   page) turned out to be a landing-page hub with no feed, no downloadable
+   queue data, and no per-project large-load interconnection list — a
+   dead end for now, not a build target. Indiana (IURC) has a promising
+   "Weekly Filings" static list. Oklahoma (OCC) and New York (DPS/DMM)
+   confirmed need a postback or an already-known case number (would need
+   a headless browser). Georgia (PSC FACTS), North Dakota PSC, Illinois
+   Commerce Commission, North Carolina Utilities Commission, and Virginia
+   SCC are inconclusive either way. A wrong guess here is worse than no
+   coverage at all — a scraper quietly returning zero results every run
+   because the URL/structure is wrong is indistinguishable from "nothing
+   new," a false sense of coverage rather than an honest gap.
+
+   Also unconfirmed: **TRACTD's own PUC entity name.** It's the sibling
+   Storey County bond at the same site as TRACTC, and almost certainly
+   files under its own distinct name too (plausibly a "Reno Power NR
+   \<n\>" sibling to TRACTC's) — but I couldn't confirm the actual name
+   well enough to add it to `PUC_ENTITY_NAMES` without guessing. Worth
+   checking the TRACTD OM's interconnection agreement, or the NV PUC
+   active-dockets list directly for other "Reno Power" filers.
+
+   A confirmed docket match is routed into the exact same pipeline as an
+   article — main-alert-eligible, not the lower-trust social/video digest
+   — since a real regulatory filing is, if anything, a MORE primary and
+   credible source than ordinary press coverage.
+
+7. **Relevance + impact analysis (Claude)** — the six layers above are a
    recall tool, not a precision tool: keyword matches produce real noise
    (a "lawsuit" keyword can just as easily hit a generic legal-blog
    explainer about crypto disclosure law as an actual lawsuit against a
@@ -201,7 +261,7 @@ Three layers of search, all feeding into a "Local / Site News" section:
    fail-open note further down for why the main alert specifically is
    protected from this).
 
-7. **Cross-model disagreement report and veto (optional)** — off by
+8. **Cross-model disagreement report and veto (optional)** — off by
    default. If `XAI_API_KEY` and/or `OPENAI_API_KEY` are set, every
    candidate batch that Claude assesses is also sent to Grok and/or GPT
    using the identical prompt and schema
@@ -253,8 +313,101 @@ Three layers of search, all feeding into a "Local / Site News" section:
    named explicitly — this specific bug was only diagnosable by reading
    OpenAI's error text ("Unsupported parameter: 'max_tokens'...").
 
-All four layers use Google News RSS or direct outlet RSS (free, no API
-key). Every article's link is hashed and checked against a persisted
+9. **YouTube — local TV + video search (added 2026-09-09)** — two more
+   candidate sources, local-site-level only (not corporate; see below for
+   why), feeding the exact same Claude relevance scoring as everything
+   above, but never the same destination — see "Social / video digest"
+   further down for why nothing from this layer can reach the main alert.
+
+   - **Local TV station RSS** (`LOCAL_TV_CHANNELS`, `fetch_youtube_
+     channel_uploads`) — free, keyless, no quota: every location maps to
+     the actual media market (DMA) that covers it (most of these are
+     small towns with no TV station of their own — e.g. Wink and Andrews,
+     TX are both covered by Midland-Odessa's KWES, not a station of their
+     own), and each station's `https://www.youtube.com/feeds/videos.xml?
+     channel_id=...` feed is polled directly. Because a station uploads
+     dozens of unrelated segments a day (weather, sports, crime), this
+     requires BOTH a data-center anchor term AND a specific identifier
+     (the site's own name/widened phrase, or one of its `SITE_KEYWORDS`/
+     `TENANT_KEYWORDS`) before a video is even considered a candidate —
+     the same anchor+specific gating `fetch_curated_entries` already uses
+     for curated RSS feeds, deliberately stricter than `fetch_local_news`'s
+     looser term-matching against a targeted search query.
+   - **YouTube keyword search** (`fetch_youtube_search`, gated behind
+     `YOUTUBE_API_KEY`) — the recall backstop for videos from channels
+     that aren't curated (independent finance/tech YouTubers, a company's
+     own channel). Uses the paid-quota `search.list` endpoint: 100 quota
+     units/call against a 10,000-unit/day free allowance. Exceeding the
+     real quota just returns `403 quotaExceeded` (no billing kicks in —
+     this API has no pay-per-overage tier), but that would also break any
+     other use of the same API key that day, so this self-limits against
+     a lower, persisted daily budget instead (`YOUTUBE_DAILY_QUOTA_BUDGET`,
+     default 9000, tracked in `youtube_quota.json`). At 19 tracked
+     locations × 100 units, one full pass already costs 1,900 units, so
+     this can't run every single hourly cycle at full coverage — each run
+     rotates its starting location by UTC hour (`_rotate`) so a budget
+     cutoff doesn't always starve the same locations run after run.
+
+   Deliberately **local-only, not corporate**: this project's own thesis
+   (see the top of this file) is that site-level news is the more
+   decision-relevant signal, and quota is scarce enough that spending it
+   on 12 more corporate queries would roughly double the burn for a
+   category this repo already treats as the lower-priority one everywhere
+   else in the pipeline.
+
+   **Known gap**: New Lebanon, Sullivan County, IN sits in the Terre
+   Haute, IN market (WTHI/WTWO) — neither station had a YouTube channel I
+   could confirm a real channel ID for at the time this was built. Left
+   empty in `LOCAL_TV_CHANNELS` rather than guessing.
+
+   **X/Twitter was deliberately not added.** As of Sep 2026, X no longer
+   has a free tier that supports keyword search, and Nitter (the
+   open-source scraping workaround) was shut down by a legal
+   cease-and-desist in Aug 2026 — there's currently no free or reliably
+   legal way to monitor arbitrary accounts by keyword. The cheapest real
+   path is X's pay-per-use API access, which has no flat monthly floor
+   but scales with read volume (realistically $50–$500+/month for
+   meaningful continuous monitoring). Revisit if that's worth the ongoing
+   cost.
+
+## Social / video digest
+
+Video candidates (both YouTube layers above) go through the identical
+three-criteria Claude relevance check every article gets — same prompt,
+same bar, same cross-model disagreement/veto check if configured. What's
+different is the destination: **nothing from this layer is ever allowed
+into the main alert, regardless of how it scores** — an explicit design
+decision, not an oversight. Video/social content is treated as less
+vetted than wire/outlet reporting, so it gets the same judgment applied to
+it but a lower ceiling on where that judgment can land.
+
+Every `on_topic` (`broad_relevant`) video candidate instead goes to a
+third digest (`build_social_email`, recipients via `SOCIAL_EMAIL_TO`,
+defaults to `REVIEW_EMAIL_TO`) — separate from both the main alert and
+the existing `on_topic`-only review digest. An item that *would* have
+cleared the full `strict_relevant` bar on its own gets an explicit
+`[would have cleared the main-alert bar]` note prepended to its analysis,
+so a human reader can judge it on the merits without the pipeline making
+that call for them.
+
+A video that clears the ledger's own bar (`on_topic AND
+primary_incremental`) still gets recorded there, tagged `"medium":
+"video"` alongside the article-sourced `"medium": "article"` entries — a
+real confirmed development belongs in the site/credit history regardless
+of which medium reported it first. Video items never populate the
+`strict_relevant` field in `seen_articles.json`'s per-story dedup state,
+so a video never counts as "already sent in the main alert" for a later
+article's cross-run duplicate check — the reverse works normally, though:
+a video's own relevance check is told about anything already sent in the
+*article* main alert for that same location, so a TV segment simply
+covering an already-alerted story correctly scores `primary_incremental:
+false` as a rehash, same as a rehash article would.
+
+All layers above (news, video, and the Nevada PUC docket scrape alike) are
+free and keyless (Google News RSS, direct outlet RSS, YouTube channel RSS,
+a plain HTTP GET for the PUC docket page) and only YouTube's search layer
+touches a paid-quota API at all.
+Every article/video's link is hashed and checked against a persisted
 `seen_articles.json` state file, so re-runs only alert on genuinely new
 stories. Old entries are trimmed after 14 days. Emails a single digest per
 type per run, split into "Corporate News" and "Local / Site News" sections

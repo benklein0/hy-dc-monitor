@@ -217,10 +217,9 @@ Three layers of search, all feeding into a "Local / Site News" section:
    checking the TRACTD OM's interconnection agreement, or the NV PUC
    active-dockets list directly for other "Reno Power" filers.
 
-   A confirmed docket match is routed into the exact same pipeline as an
-   article — main-alert-eligible, not the lower-trust social/video digest
-   — since a real regulatory filing is, if anything, a MORE primary and
-   credible source than ordinary press coverage.
+   A confirmed docket match is routed into the exact same main-alert-eligible
+   pipeline as an article — a real regulatory filing is, if anything, a
+   MORE primary and credible source than ordinary press coverage.
 
 7. **Relevance + impact analysis (Claude)** — the six layers above are a
    recall tool, not a precision tool: keyword matches produce real noise
@@ -353,11 +352,13 @@ Three layers of search, all feeding into a "Local / Site News" section:
    named explicitly — this specific bug was only diagnosable by reading
    OpenAI's error text ("Unsupported parameter: 'max_tokens'...").
 
-9. **YouTube — local TV + video search (added 2026-09-09)** — two more
-   candidate sources, local-site-level only (not corporate; see below for
-   why), feeding the exact same Claude relevance scoring as everything
-   above, but never the same destination — see "Social / video digest"
-   further down for why nothing from this layer can reach the main alert.
+9. **YouTube — local TV + video search (added 2026-09-09, promoted to the
+   main alert 2026-09-16)** — two more candidate sources, local-site-level
+   only (not corporate; see below for why), feeding the exact same Claude
+   relevance scoring as everything above — and, as of 2026-09-16, the exact
+   same destination too. A `strict_relevant` video is just as eligible for
+   the main alert as a `strict_relevant` article; see "Video in the main
+   alert" further down for what changed and why.
 
    - **Local TV station RSS** (`LOCAL_TV_CHANNELS`, `fetch_youtube_
      channel_uploads`) — free, keyless, no quota: every location maps to
@@ -410,38 +411,38 @@ Three layers of search, all feeding into a "Local / Site News" section:
    meaningful continuous monitoring). Revisit if that's worth the ongoing
    cost.
 
-## Social / video digest
+## Video in the main alert
 
 Video candidates (both YouTube layers above) go through the identical
 three-criteria Claude relevance check every article gets — same prompt,
-same bar, same cross-model disagreement/veto check if configured. What's
-different is the destination: **nothing from this layer is ever allowed
-into the main alert, regardless of how it scores** — an explicit design
-decision, not an oversight. Video/social content is treated as less
-vetted than wire/outlet reporting, so it gets the same judgment applied to
-it but a lower ceiling on where that judgment can land.
+same bar, same cross-model disagreement/veto check if configured — and,
+as of 2026-09-16, the identical destination too: a `strict_relevant`
+video lands in the main alert's "Local / Site News" section for that
+location, right alongside any article hits, formatted exactly the same
+way (title, source, date, Claude's impact analysis).
 
-Every `on_topic` (`broad_relevant`) video candidate instead goes to a
-third digest (`build_social_email`, recipients via `SOCIAL_EMAIL_TO`,
-defaults to `REVIEW_EMAIL_TO`) — separate from both the main alert and
-the existing `on_topic`-only review digest. An item that *would* have
-cleared the full `strict_relevant` bar on its own gets an explicit
-`[would have cleared the main-alert bar]` note prepended to its analysis,
-so a human reader can judge it on the merits without the pipeline making
-that call for them.
+This is a reversal of the original design, which routed every video
+candidate to a separate, lower-trust digest that never reached the main
+alert regardless of score. That digest (`build_social_email`,
+`SOCIAL_EMAIL_TO`, the `_log_and_route_social` routing function) has been
+removed — video is now treated as a first-class source on equal footing
+with wire/outlet news, same scoring bar and all. An `on_topic` video that
+doesn't clear the full `strict_relevant` bar still lands in the ordinary
+`REVIEW_EMAIL_TO` QC digest, same as an on-topic-but-not-material article
+would.
 
 A video that clears the ledger's own bar (`on_topic AND
-primary_incremental`) still gets recorded there, tagged `"medium":
-"video"` alongside the article-sourced `"medium": "article"` entries — a
-real confirmed development belongs in the site/credit history regardless
-of which medium reported it first. Video items never populate the
-`strict_relevant` field in `seen_articles.json`'s per-story dedup state,
-so a video never counts as "already sent in the main alert" for a later
-article's cross-run duplicate check — the reverse works normally, though:
-a video's own relevance check is told about anything already sent in the
-*article* main alert for that same location, so a TV segment simply
-covering an already-alerted story correctly scores `primary_incremental:
-false` as a rehash, same as a rehash article would.
+primary_incremental`) is recorded there tagged `"medium": "video"`
+alongside the article-sourced `"medium": "article"` entries — a real
+confirmed development belongs in the site/credit history regardless of
+which medium reported it first; `medium` is now purely a provenance tag; the
+main-alert bar itself is medium-agnostic. A video's own relevance check is
+still told about anything already sent in the main alert for that same
+location, so a TV segment simply covering an already-alerted story
+correctly scores `primary_incremental: false` as a rehash, same as a
+rehash article would — and now that video's `strict_relevant` value is
+recorded for real (no longer forced to `false`), that dedup context stays
+accurate whether the earlier alert came from an article or a video.
 
 All layers above (news, video, and the Nevada PUC docket scrape alike) are
 free and keyless (Google News RSS, direct outlet RSS, YouTube channel RSS,
@@ -563,13 +564,20 @@ current `credit_ledger.json` when you want it brought up to date.
   relying on the LLM to catch every instance, these are blocked outright
   before an article is even considered a candidate: currently Seeking
   Alpha, Motley Fool, Zacks, Benzinga, InvestorPlace, MarketBeat, Simply
-  Wall St, GuruFocus, Insider Monkey, TipRanks, Barchart, 24/7 Wall St.
-  Matched against the article's source name (or the " - Source Name"
-  suffix Google News appends to titles), not the link domain — Google
-  News RSS wraps links through news.google.com, so the true publisher
-  domain usually isn't recoverable from the link itself. Add more names
-  to the `BLOCKED_SOURCES` set in `monitor.py` as needed; blocked items
-  are logged as `[blocked source]` in the Railway deploy logs.
+  Wall St, GuruFocus, Insider Monkey, TipRanks, Barchart, 24/7 Wall St, and
+  (added 2026-09-16) Yahoo Finance — less a newsroom of its own than a
+  syndication host, so much of what runs under "Yahoo Finance" as the
+  Google News source name is the exact same wire copy from the outlets
+  already blocked above, just re-attributed once it's rehosted on
+  finance.yahoo.com. Added after repeated real-traffic evidence of
+  derivative, non-incremental Yahoo Finance pickups reaching the main
+  alert. Matched against the article's source name (or the " - Source
+  Name" suffix Google News appends to titles), not the link domain —
+  Google News RSS wraps links through news.google.com, so the true
+  publisher domain usually isn't recoverable from the link itself. Add
+  more names to the `BLOCKED_SOURCES` set in `monitor.py` as needed;
+  blocked items are logged as `[blocked source]` in the Railway deploy
+  logs.
 - **Deterministic junk-headline pre-filter** (`_JUNK_HEADLINE_PATTERNS`) —
   a handful of headline shapes are structurally non-primary regardless of
   content: an explicit "Opinion |" / "Op-Ed" / "Analysis:" label, a

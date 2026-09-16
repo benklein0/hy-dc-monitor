@@ -564,18 +564,6 @@ CROSS_MODEL_REPORT_EMAIL_TO = [
     if addr.strip()
 ]
 
-# Recipients for the social/video digest (see build_social_email). Defaults
-# to REVIEW_EMAIL_TO for the same reason REVIEW_EMAIL_TO itself defaults
-# narrow — this is a QC/monitoring tool, not something the full
-# distribution needs cluttering their inbox with, and video/social content
-# is explicitly never allowed into the main alert regardless of how it
-# scores (see the note in _log_and_route_social).
-SOCIAL_EMAIL_TO = [
-    addr.strip()
-    for addr in os.environ.get("SOCIAL_EMAIL_TO", ",".join(REVIEW_EMAIL_TO)).split(",")
-    if addr.strip()
-]
-
 
 # ---------------------------------------------------------------------------
 # Derived lookup tables: unique parents / locations -> tickers referencing them
@@ -726,10 +714,12 @@ def record_ledger_event(ledger, context_type, group_label, tickers, verdict, art
     in normal operation, but cheap to guard against) never double-records.
 
     medium distinguishes what kind of source reported this — "article"
-    (the original, still-default case) or "video" (local TV/YouTube — see
-    _log_and_route_social) — so the ledger reads as one merged site/credit
-    history regardless of source type, while still letting a human filter
-    by medium later if that turns out to matter."""
+    (the original, still-default case) or "video" (local TV/YouTube) — so
+    the ledger reads as one merged site/credit history regardless of
+    source type, while still letting a human filter by medium later if
+    that turns out to matter. Video and articles are otherwise treated
+    identically from here on (same main-alert eligibility) — medium is
+    purely a provenance tag now, not a routing signal."""
     if not (verdict.get("on_topic") and verdict.get("primary_incremental")):
         return
     entry = verdict["entry"]
@@ -802,6 +792,15 @@ BLOCKED_SOURCES = {
     "tipranks",
     "barchart",
     "24/7 wall st", "247wallst",
+    # Added 2026-09-16 after repeated real-traffic evidence: "Yahoo Finance"
+    # (the Google News source name for finance.yahoo.com) is less a
+    # newsroom of its own than a syndication host — much of what runs
+    # under it is the exact same Zacks/Motley Fool/Barchart/Insider Monkey
+    # wire copy already blocked above by its original byline, just
+    # re-attributed to Yahoo once it's rehosted there. Kept reaching the
+    # main alert as a "new" item despite being a derivative rehash, same
+    # failure mode this whole list exists to catch.
+    "yahoo finance",
 }
 
 
@@ -1027,13 +1026,15 @@ def fetch_raw_location_news(location):
 # would roughly double the quota burn for a category this repo already
 # treats as the lower-priority, higher-bar one everywhere else.
 #
-# NEITHER layer feeds the main alert directly — see _log_and_route_social
-# in main(): every video candidate goes through the exact same Claude
-# relevance scoring as articles, but is routed to a dedicated social/video
-# digest instead, never the main alert, regardless of how it scores. This
-# was an explicit design choice: video/social content is less vetted than
-# wire/outlet news, so it gets the same judgment applied but a lower ceiling
-# on where it can land.
+# Both layers feed the exact same pipeline as articles: every video
+# candidate goes through the identical Claude relevance scoring
+# (assess_relevance) as a news article, and a strict_relevant video is
+# just as eligible for the main alert as a strict_relevant article (see
+# the local-video loop in main(), which reuses _log_split_and_record).
+# Earlier versions routed video to a separate, lower-trust digest that
+# never reached the main alert regardless of score; that digest was
+# retired 2026-09-16 in favor of treating video as a first-class source
+# on equal footing with wire/outlet news, same scoring bar and all.
 def _normalize_youtube_entry(entry, source_name):
     """Feedparser's Atom+media-namespace parsing puts a video's description
     under `media_description`, not the `summary` field every other function
@@ -1525,8 +1526,8 @@ def fetch_puc_dockets(location):
     through the exact same dedup/relevance/ledger pipeline as a news
     article — a real regulatory filing is, if anything, a MORE primary
     and credible source than ordinary press coverage, so this is wired
-    into the same main-alert-eligible local pipeline (fetch_local_news
-    etc.), not the lower-trust social/video digest."""
+    into the same main-alert-eligible local pipeline as fetch_local_news
+    etc."""
     source = PUC_DOCKET_SOURCES.get(location)
     if not source:
         return []
@@ -1609,52 +1610,6 @@ def build_email(new_corporate, new_local, subject_prefix="HY Datacenter News Ale
         html_parts.append("<h2>Local / Site News</h2>")
         text_parts.append("\n=== LOCAL / SITE NEWS ===")
         for location, items in new_local.items():
-            tickers = ", ".join(LOCATION_GROUPS[location])
-            html_parts.append(f"<h3>{location} ({tickers})</h3>")
-            html_parts.append(_render_items_html(items))
-            text_parts.append(f"\n{location} ({tickers})")
-            text_parts.append(_render_items_text(items))
-
-    html = f"<html><body>{''.join(html_parts)}</body></html>"
-    text = "\n".join(text_parts)
-
-    return {"subject": subject, "html": html, "text": text}
-
-
-def build_social_email(new_corporate_video, new_local_video):
-    """Digest for on-topic video/social candidates (currently: local TV
-    station uploads + YouTube keyword search — see _log_and_route_social
-    in main()). Structurally mirrors build_email, but nothing here EVER
-    reached the main alert regardless of how it scored — that's the whole
-    point of this being a separate email — so each item's note says
-    whether it would have cleared the strict main-alert bar on its own,
-    for a human reader's judgment rather than the pipeline's."""
-    total = sum(len(v) for v in new_corporate_video.values()) + sum(len(v) for v in new_local_video.values())
-    subject = f"HY Datacenter News — Social/Video Digest — {total} new item{'s' if total != 1 else ''}"
-
-    html_parts = [
-        "<p>On-topic video coverage (local TV stations, YouTube search) for tracked "
-        "HY datacenter bonds. This never reaches the main alert regardless of how it "
-        "scores — video/social content is treated as less vetted than wire/outlet "
-        "news — but a note flags anything that would have cleared the strict "
-        f"main-alert bar on its own (last {LOOKBACK_WINDOW}):</p>"
-    ]
-    text_parts = ["On-topic video coverage — never sent to the main alert (see note above):"]
-
-    if new_corporate_video:
-        html_parts.append("<h2>Corporate</h2>")
-        text_parts.append("\n=== CORPORATE (VIDEO) ===")
-        for parent, items in new_corporate_video.items():
-            tickers = ", ".join(PARENT_GROUPS[parent])
-            html_parts.append(f"<h3>{parent} ({tickers})</h3>")
-            html_parts.append(_render_items_html(items))
-            text_parts.append(f"\n{parent} ({tickers})")
-            text_parts.append(_render_items_text(items))
-
-    if new_local_video:
-        html_parts.append("<h2>Local / Site</h2>")
-        text_parts.append("\n=== LOCAL / SITE (VIDEO) ===")
-        for location, items in new_local_video.items():
             tickers = ", ".join(LOCATION_GROUPS[location])
             html_parts.append(f"<h3>{location} ({tickers})</h3>")
             html_parts.append(_render_items_html(items))
@@ -2352,10 +2307,9 @@ def main():
 
     strict_corporate, strict_local = {}, {}
     broad_corporate, broad_local = {}, {}  # on-topic but excluded from strict — for QC review only
-    social_local = {}  # on-topic video/social — NEVER promoted to the main alert, see _log_and_route_social
     disagreement_records = []  # cross-model audit only, never gates the real emails
 
-    def _log_split_and_record(verdicts, tag, context_type, group_label, tickers):
+    def _log_split_and_record(verdicts, tag, context_type, group_label, tickers, medium="article"):
         strict_items = []
         broad_extra_items = []
         for v in verdicts:
@@ -2382,48 +2336,10 @@ def main():
             # the "confirmed real news" bar (on_topic + primary_incremental
             # — see the ledger's module-level comment for why that's a
             # different, and deliberately lower, bar than strict_relevant).
-            record_ledger_event(ledger, context_type, group_label, tickers, v, key)
-        return strict_items, broad_extra_items
-
-    def _log_and_route_social(verdicts, context_type, group_label, tickers, medium):
-        """Runs video/social candidates through the exact same relevance
-        scoring as articles, but routes the result differently — an
-        explicit design decision (not an oversight) that this medium is
-        noisier/less vetted than wire news, so NOTHING from it is ever
-        allowed to reach the main alert, even an item that scores
-        strict_relevant. Every on_topic (broad_relevant) item instead goes
-        to the social/video digest, annotated with whether it would have
-        cleared the strict bar on its own — still useful signal for a
-        human, just not enough by itself from an unvetted medium.
-
-        Also writes seen[key]["strict_relevant"] = False unconditionally
-        (never the verdict's real value) — a video was never in the main
-        alert, so it must never count as "already sent in the main alert"
-        for a future article's cross-run dedup context
-        (_recent_alerted_context filters on exactly that field).
-
-        Still qualifies for the durable ledger on the same on_topic AND
-        primary_incremental bar as articles — a real confirmed development
-        is worth recording regardless of which medium first reported it."""
-        social_items = []
-        for v in verdicts:
-            title = v["entry"].get("title", "Untitled")
-            link = v["entry"].get("link", "")
-            log_tag = "would-alert" if v["strict_relevant"] else ("on-topic" if v["broad_relevant"] else "rejected")
-            print(f"    [social:{log_tag}] {title}")
-            print(f"           {link}")
-            print(f"           reason: {v['analysis']}")
-            if v["broad_relevant"]:
-                note = v["analysis"]
-                if v["strict_relevant"]:
-                    note = f"[would have cleared the main-alert bar] {note}"
-                social_items.append((v["entry"], note))
-            key = article_key(v["entry"])
-            if key in seen:
-                seen[key]["strict_relevant"] = False
-                seen[key]["analysis"] = v["analysis"]
+            # medium is purely a provenance tag on the ledger record now —
+            # video and articles are otherwise scored and routed identically.
             record_ledger_event(ledger, context_type, group_label, tickers, v, key, medium=medium)
-        return social_items
+        return strict_items, broad_extra_items
 
     for parent in list(new_corporate.keys()):
         entries = new_corporate[parent]
@@ -2470,9 +2386,18 @@ def main():
         verdicts, records = cross_model_disagreement_report(
             location, LOCATION_GROUPS[location], entries, "local", verdicts, previously_alerted_titles=prior_titles)
         disagreement_records.extend(records)
-        social_items = _log_and_route_social(verdicts, "local", location, LOCATION_GROUPS[location], medium="video")
-        if social_items:
-            social_local[location] = social_items
+        # As of 2026-09-16, video is scored and routed exactly like an
+        # article — a strict_relevant video is just as eligible for the
+        # main alert as a strict_relevant article (see the module comment
+        # above LOCAL_TV_CHANNELS for why this changed from the earlier
+        # separate-digest design). medium="video" keeps the ledger able to
+        # tell the two apart even though routing no longer does.
+        strict_items, broad_extra_items = _log_split_and_record(
+            verdicts, f"local-video:{location}", "local", location, LOCATION_GROUPS[location], medium="video")
+        if strict_items:
+            strict_local.setdefault(location, []).extend(strict_items)
+        if broad_extra_items:
+            broad_local.setdefault(location, []).extend(broad_extra_items)
 
     save_seen(seen)
     save_ledger(ledger)
@@ -2496,14 +2421,6 @@ def main():
         print(f"[{datetime.now(timezone.utc).isoformat()}] Sent review digest with {total} excluded-but-on-topic item(s) to {REVIEW_EMAIL_TO}.")
     else:
         print(f"[{datetime.now(timezone.utc).isoformat()}] No excluded-but-on-topic items for the review digest this run.")
-
-    if social_local:
-        social_msg = build_social_email({}, social_local)
-        send_email(social_msg, recipients=SOCIAL_EMAIL_TO)
-        total = sum(len(v) for v in social_local.values())
-        print(f"[{datetime.now(timezone.utc).isoformat()}] Sent social/video digest with {total} on-topic item(s) to {SOCIAL_EMAIL_TO}.")
-    else:
-        print(f"[{datetime.now(timezone.utc).isoformat()}] No on-topic video items for the social digest this run.")
 
     if disagreement_records:
         disagreement_msg = build_disagreement_email(disagreement_records)

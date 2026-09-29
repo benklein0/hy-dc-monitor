@@ -352,6 +352,24 @@ Three layers of search, all feeding into a "Local / Site News" section:
    named explicitly — this specific bug was only diagnosable by reading
    OpenAI's error text ("Unsupported parameter: 'max_tokens'...").
 
+   `_call_claude` (the primary provider, not just the cross-model
+   comparison) got the same body-capture treatment on 2026-09-29, after
+   an incident where every relevance check failed open for about 9
+   hours (2026-09-28, roughly 12:00-21:00 UTC) with logs showing only
+   `400 Client Error: Bad Request for url: ...` and no way to tell why —
+   `resp.raise_for_status()`'s default exception text doesn't include
+   the response body, so the actual reason Anthropic rejected the
+   request was never visible. The root cause of that specific incident
+   was never conclusively identified (a live test call made ~4 hours
+   after the failures stopped succeeded normally against the same key
+   and model, so whatever it was had already resolved by the time it
+   could be reproduced — credit balance and model/API-version
+   deprecation were checked and ruled out). If `(unassessed — Claude
+   call failed...)` shows up in the review digest again, check the
+   Railway deploy logs for that run: the `[warn] Claude relevance check
+   failed for ...` line will now include `— response body: ...` with
+   Anthropic's actual error message.
+
 9. **YouTube — local TV + video search (added 2026-09-09, promoted to the
    main alert 2026-09-16)** — two more candidate sources, local-site-level
    only (not corporate; see below for why), feeding the exact same Claude
@@ -616,23 +634,28 @@ current `credit_ledger.json` when you want it brought up to date.
 ## Cron schedule / quiet hours
 
 Railway cron always evaluates in **UTC**, with no timezone override
-available. To run hourly from 6am–6pm Eastern and stay silent overnight,
-set the Cron Schedule (Settings → Cron Schedule) to:
+available. The live schedule (Settings → Cron Schedule) is currently:
 
 ```
-0 10-22 * * *
+0 10-22 * * 1-5
 ```
+
+Hourly, 6am–6pm Eastern, **Monday–Friday only** (added 2026-09-21 — it
+used to run all 7 days). Cron's 5th field is day-of-week (0/7 = Sunday,
+1 = Monday, ... 6 = Saturday), so `1-5` is what restricts this to
+weekdays; drop it back to `*` to resume running every day.
 
 (6am ET = 10:00 UTC, 6pm ET = 22:00 UTC, during Eastern Daylight Time.)
 
-**This needs manual updating twice a year for DST.** When clocks fall
-back (EST = UTC-5, typically early November), change it to:
+**The hour range needs manual updating twice a year for DST** (the
+weekday restriction itself doesn't shift). When clocks fall back
+(EST = UTC-5, typically early November), change it to:
 
 ```
-0 11-23 * * *
+0 11-23 * * 1-5
 ```
 
-and back to `0 10-22 * * *` when clocks spring forward again in March.
+and back to `0 10-22 * * 1-5` when clocks spring forward again in March.
 Railway has no timezone-aware cron option, so there's no way to avoid
 this without running a separate always-on scheduler process.
 

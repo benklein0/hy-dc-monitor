@@ -1825,7 +1825,18 @@ def _call_claude(system_prompt, user_prompt, max_tokens=2000):
         },
         timeout=60,
     )
-    resp.raise_for_status()
+    try:
+        resp.raise_for_status()
+    except Exception as e:
+        # 2026-09-29: added after a sustained incident (every relevance
+        # check failing open for ~9 hours on 2026-09-28) where the only
+        # thing in the logs was "400 Client Error: Bad Request for url:
+        # ..." with no way to tell WHY — raise_for_status()'s default
+        # string doesn't include the response body. Mirrors
+        # _call_openai_compatible's existing body-capture below so a
+        # future failure is diagnosable straight from logs instead of
+        # requiring a manual one-off API call to reproduce it.
+        raise RuntimeError(f"{e} — response body: {resp.text[:500]}") from e
     data = resp.json()
     usage = data.get("usage", {})
     _usage_totals["anthropic"]["input_tokens"] += usage.get("input_tokens", 0)

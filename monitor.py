@@ -631,11 +631,14 @@ def trim_seen(seen):
 # same underlying story reworded by a different outlet — e.g. "SB Energy
 # files for IPO" vs "American data center operator SB Energy is planning
 # an IPO" — which fuzzy title-matching alone won't catch since the wording
-# differs too much). Kept shorter than MAX_SEEN_AGE_DAYS (which governs how
-# long we remember hashes purely for exact-dedup purposes). Widened from
-# an original 10 days — HY credit story arcs (an IPO process, a financing
-# round) often play out over multiple weeks with each new mention reworded,
-# and a too-short window let genuine re-reports slip through as "new."
+# differs too much). NOTE: this is actually LONGER than MAX_SEEN_AGE_DAYS
+# (14 days) despite an earlier version of this comment claiming the
+# opposite — it was widened from an original 10 days (itself shorter than
+# MAX_SEEN_AGE_DAYS at the time) because HY credit story arcs (an IPO
+# process, a financing round) often play out over multiple weeks with each
+# new mention reworded, and a too-short window let genuine re-reports slip
+# through as "new." The comment was never updated when the number crossed
+# over MAX_SEEN_AGE_DAYS; corrected 2026-10-02 during a dedup audit.
 RECENTLY_ALERTED_LOOKBACK_DAYS = 21
 
 
@@ -652,6 +655,50 @@ def _recent_alerted_context(seen, tag, max_age_days=RECENTLY_ALERTED_LOOKBACK_DA
         if v.get("tag") == tag and v.get("strict_relevant") and v.get("title") and v.get("first_seen", 0) > cutoff:
             analysis = v.get("analysis", "")
             out.append(f"{v['title']} — {analysis}" if analysis else v["title"])
+    return out
+
+
+# Separate, much longer lookback for the credit LEDGER (never-trimmed —
+# see the module comment above it) rather than `seen` (pruned after
+# MAX_SEEN_AGE_DAYS=14). Added 2026-10-02 after real-traffic evidence of
+# old articles resurfacing with a fresh-looking feed timestamp (Google
+# News occasionally re-crawls/re-dates a page well after its real
+# publication date) long after the original coverage aged out of both
+# `seen`'s 14-day dedup memory and the 21-day main-alert window above —
+# with nothing short enough to catch it, it reads as brand-new. The
+# ledger has no such horizon: anything on_topic+primary_incremental ever
+# recorded for this bond group is still there. This context is weaker
+# than "sent to the main alert" (it doesn't require strict_relevant, so
+# it includes things that were on-topic but didn't clear the market-moving
+# bar) and is labeled separately in the prompt rather than merged into the
+# main-alert block, but gives Claude's existing stale/re-report judgment
+# something to check a suspiciously-timed resurfacing against beyond 21
+# days back. Capped at a year rather than left fully unbounded mostly to
+# keep prompt size sane over the life of the project, not because older
+# history stops being useful.
+LEDGER_CONTEXT_LOOKBACK_DAYS = 365
+
+
+def _ledger_recorded_context(ledger, context_type, group_label, max_age_days=LEDGER_CONTEXT_LOOKBACK_DAYS):
+    """Returns "TITLE — analysis" strings for everything ever recorded in
+    the ledger for this bond group (on_topic AND primary_incremental,
+    regardless of whether it reached the main alert), within max_age_days.
+    See LEDGER_CONTEXT_LOOKBACK_DAYS above for why this exists alongside
+    _recent_alerted_context rather than replacing it."""
+    bucket_key = "by_location" if context_type == "local" else "by_parent"
+    events = ledger.get(bucket_key, {}).get(group_label, [])
+    cutoff = time.time() - max_age_days * 86400
+    out = []
+    for e in events:
+        recorded_at = e.get("recorded_at", "")
+        try:
+            ts = datetime.fromisoformat(recorded_at).timestamp() if recorded_at else 0
+        except ValueError:
+            ts = 0
+        if ts <= cutoff or not e.get("title"):
+            continue
+        analysis = e.get("analysis", "")
+        out.append(f"{e['title']} — {analysis}" if analysis else e["title"])
     return out
 
 
@@ -988,9 +1035,23 @@ def fetch_raw_ticker_news(parent_name):
 # enough to overwhelm a single Claude call. This is exactly the flood
 # fetch_local_news's anchor-term gating exists to prevent — skip the raw
 # layer for these specifically rather than reopening that hole.
+#
+# Added "Atlanta, Georgia" (EDGCOM) on 2026-10-02 after a traffic audit:
+# every other location's hourly "assessing local" batch ran 1-4 candidates;
+# Atlanta alone ran 13-58 (one run had to split into multiple Claude calls
+# just to fit under MAX_CANDIDATES_PER_CLAUDE_CALL), almost entirely Zoo
+# Atlanta pandas, Falcons tailgate menus, metro crime blotter items, NWSL
+# branding news, and individual real-estate listings — a 6-25x outlier
+# versus every other tracked site, for exactly the reason this set exists:
+# a bare "Atlanta" search can't tell a 6-million-person metro's daily news
+# volume from site-specific signal. The gated fetch_local_news (anchor
+# terms + EDGCOM's tenants Alibaba/CoreWeave) and fetch_site_specific_news
+# still cover this location; only the ungated recall-backstop layer is
+# skipped.
 RAW_LOCATION_SEARCH_EXCLUDE = {
     "Austin, Texas",
     "Chicago, Illinois",
+    "Atlanta, Georgia",
 }
 
 
@@ -1763,6 +1824,8 @@ REFERENCE/COMPARISON USAGE: also NOT on_topic — an article whose actual subjec
 
 METRO-WIDE INCIDENTS: a story about a metro-area-wide event (a storm-related power outage affecting thousands of homes, general regional weather disruption) is not automatically market-moving just because the tracked site sits in that metro. Check whether the article confirms the specific site was actually affected (or the tenant's operations were disrupted) — a "5,000 homes without power" story that never mentions the data center itself is weaker evidence than one that does, especially when the site's power source includes backup generators (check the bond detail above) that would blunt a grid-level outage. Don't assume site impact just from geographic proximity; look for an actual stated connection.
 
+METRO-WIDE GENERAL DEVELOPMENT, CIVIC, AND REAL-ESTATE NEWS (added 2026-10-02 after a traffic audit on EDGCOM's Atlanta site found Claude marking items like a regional trail/greenway completion, a public-art monument installation, and an unrelated $10M+ residential estate sale as on_topic AND market_moving via reasoning like "relevant to the site's competitive/collateral context" — vague enough to rationalize almost anything happening anywhere in a large metro): for a site in a large city or metro area, on_topic requires the article's actual subject to be this site, this tenant, or a process/decision body with direct authority over this site (its specific permitting, utility, zoning, or tax-abatement case) — NOT a general-interest civic, cultural, infrastructure, or real-estate story that merely happens to occur somewhere in the same metro. A regional trail/park/Beltline-type project completing a segment, a public art installation, a human-interest or charity story, or a real estate sale/listing for a DIFFERENT property are not on_topic just because they're geographically in the same city and an article can be made to sound credit-relevant with enough hedge-free-sounding but ultimately generic language ("directly relevant to [X]'s competitive/collateral context," "signals continued market activity"). If you find yourself writing "context," "environment," "landscape," or "signals activity" to justify market_moving without naming the actual mechanism connecting THIS specific event to THIS site's permitting, utility, lease, or financing — that's the same guessing pattern the CONFIDENCE CHECK rule below already tells you to resolve to false, just dressed up in finance-sounding language instead of a hedge word. Mark on_topic=false for these rather than letting market_moving catch them, consistent with how every other "technically mentions the place but isn't about the site" pattern in this prompt is handled.
+
 CRITICAL — SITE-MATCHING FOR MULTI-SITE SPONSORS: some corporate parents sponsor multiple separate project-finance bonds secured by DIFFERENT physical sites (e.g. TeraWulf's WULF notes are secured by its Barker, NY site; its FLASHC notes by a different Abernathy, TX site — a news story about a third TeraWulf site, e.g. one in Hancock County, KY, is about neither). Each bond's "Site location(s)" is given in the bond detail above. If a CORPORATE-context article describes a development at a specific site, check whether that site matches the site(s) listed for the ticker(s) in this group:
 - If the site matches (or the article is genuinely company-wide — overall earnings, corporate-level financing, executive changes, litigation against the parent entity itself, credit ratings on the parent) — proceed with the normal market_moving assessment.
 - If the site does NOT match — it's a different, untracked site under the same sponsor — do not treat it as market_moving for this bond's specific collateral. Say so explicitly in the analysis (e.g. "this is TeraWulf's Hancock, KY site, not WULF's Barker, NY or FLASHC's Abernathy, TX sites — no direct collateral impact"), and only mark it relevant if you're treating it purely as weak, general sponsor-level context (which should still generally be market_moving=false unless the scale is large enough to plausibly affect the sponsor's overall ability to support all its project subsidiaries).
@@ -1954,7 +2017,8 @@ def _bond_detail_lines(tickers):
 MAX_CANDIDATES_PER_CLAUDE_CALL = 25
 
 
-def _assess_relevance_with(call_fn, provider_label, group_label, tickers, entries, context_type, previously_alerted_titles=None):
+def _assess_relevance_with(call_fn, provider_label, group_label, tickers, entries, context_type,
+                            previously_alerted_titles=None, ledger_titles=None):
     """Thin wrapper around _assess_relevance_llm that first splits off any
     entries matching a _JUNK_HEADLINE_PATTERNS pattern (see definition above)
     — those get a synthetic verdict without spending an API call, since the
@@ -1989,14 +2053,15 @@ def _assess_relevance_with(call_fn, provider_label, group_label, tickers, entrie
     if remaining:
         remaining_entries = [e for _, e in remaining]
         remaining_verdicts = _assess_relevance_llm(call_fn, provider_label, group_label, tickers, remaining_entries,
-                                                     context_type, previously_alerted_titles)
+                                                     context_type, previously_alerted_titles, ledger_titles)
         for (orig_i, _), v in zip(remaining, remaining_verdicts):
             verdicts_by_index[orig_i] = v
 
     return [verdicts_by_index[i] for i in range(len(entries))]
 
 
-def _assess_relevance_llm(call_fn, provider_label, group_label, tickers, entries, context_type, previously_alerted_titles=None):
+def _assess_relevance_llm(call_fn, provider_label, group_label, tickers, entries, context_type,
+                           previously_alerted_titles=None, ledger_titles=None):
     """Provider-agnostic core of the relevance assessment — call_fn is
     _call_claude, _call_grok, or _call_gpt. Called by _assess_relevance_with
     above once the junk-headline-pattern entries have already been split off.
@@ -2022,7 +2087,7 @@ def _assess_relevance_llm(call_fn, provider_label, group_label, tickers, entries
         for start in range(0, len(entries), MAX_CANDIDATES_PER_CLAUDE_CALL):
             chunk = entries[start:start + MAX_CANDIDATES_PER_CLAUDE_CALL]
             results.extend(_assess_relevance_llm(call_fn, provider_label, group_label, tickers, chunk,
-                                                  context_type, previously_alerted_titles))
+                                                  context_type, previously_alerted_titles, ledger_titles))
         return results
 
     article_lines = []
@@ -2054,11 +2119,27 @@ def _assess_relevance_llm(call_fn, provider_label, group_label, tickers, entries
     else:
         prior_block = ""
 
+    if ledger_titles:
+        ledger_block = (
+            "\n\nALSO ON RECORD for this bond group (on-topic, primary developments "
+            f"logged over the last {LEDGER_CONTEXT_LOOKBACK_DAYS} days — NOT necessarily "
+            "sent to the main alert, e.g. some were on-topic but not market-moving at the "
+            "time; this list exists specifically to catch an old story resurfacing with a "
+            "misleadingly fresh-looking publish date, which happens occasionally when a "
+            "feed re-crawls or re-syndicates a page well after it first ran — if a "
+            "candidate reports the same underlying fact as one of these with no genuinely "
+            "new development, treat it as stale and mark primary_incremental=false even "
+            "though the feed timestamp looks recent):\n" + "\n".join(f"- {t}" for t in ledger_titles)
+        )
+    else:
+        ledger_block = ""
+
     user_prompt = (
         f"Search context: {context_type.upper()}\n"
         f"Bond group: {group_label}\n"
         f"Bond detail:\n{_bond_detail_lines(tickers)}"
-        f"{prior_block}\n\n"
+        f"{prior_block}"
+        f"{ledger_block}\n\n"
         f"Candidate articles:\n" + "\n".join(article_lines)
     )
 
@@ -2109,7 +2190,7 @@ def _assess_relevance_llm(call_fn, provider_label, group_label, tickers, entries
     return verdicts
 
 
-def assess_relevance(group_label, tickers, entries, context_type, previously_alerted_titles=None):
+def assess_relevance(group_label, tickers, entries, context_type, previously_alerted_titles=None, ledger_titles=None):
     """Assesses every keyword-matched candidate for genuine relevance,
     bond-specificity, and materiality, using Claude — this is the one
     that actually gates the main alert and review digest. context_type
@@ -2120,16 +2201,19 @@ def assess_relevance(group_label, tickers, entries, context_type, previously_ale
     Claude can catch the same underlying story reworded by a different
     outlet (fuzzy title-matching alone misses this when the wording
     differs enough, e.g. "SB Energy files for IPO" vs "American data
-    center operator SB Energy is planning an IPO").
+    center operator SB Energy is planning an IPO"). ledger_titles
+    (optional) is the same idea over a much longer horizon, sourced from
+    the never-trimmed credit ledger rather than the 21-day main-alert
+    window — see LEDGER_CONTEXT_LOOKBACK_DAYS for why.
 
     See _assess_relevance_with for the return shape and batching/fail-open
     behavior, which this delegates to."""
     return _assess_relevance_with(_call_claude, "Claude", group_label, tickers, entries, context_type,
-                                   previously_alerted_titles)
+                                   previously_alerted_titles, ledger_titles)
 
 
 def cross_model_disagreement_report(group_label, tickers, entries, context_type, claude_verdicts,
-                                     previously_alerted_titles=None):
+                                     previously_alerted_titles=None, ledger_titles=None):
     """Runs the same candidate batch through whichever of Grok/GPT are
     configured (via XAI_API_KEY / OPENAI_API_KEY), using the identical
     prompt and schema Claude uses.
@@ -2164,10 +2248,10 @@ def cross_model_disagreement_report(group_label, tickers, entries, context_type,
     other_verdicts = {}
     if XAI_API_KEY:
         other_verdicts["Grok"] = _assess_relevance_with(
-            _call_grok, "Grok", group_label, tickers, entries, context_type, previously_alerted_titles)
+            _call_grok, "Grok", group_label, tickers, entries, context_type, previously_alerted_titles, ledger_titles)
     if OPENAI_API_KEY:
         other_verdicts["GPT"] = _assess_relevance_with(
-            _call_gpt, "GPT", group_label, tickers, entries, context_type, previously_alerted_titles)
+            _call_gpt, "GPT", group_label, tickers, entries, context_type, previously_alerted_titles, ledger_titles)
 
     both_configured = bool(XAI_API_KEY) and bool(OPENAI_API_KEY)
 
@@ -2356,10 +2440,12 @@ def main():
         entries = new_corporate[parent]
         print(f"  assessing corporate: {parent} ({len(entries)} candidate(s))")
         prior_titles = _recent_alerted_context(seen, f"corp:{parent}")
+        ledger_titles = _ledger_recorded_context(ledger, "corporate", parent)
         verdicts = assess_relevance(parent, PARENT_GROUPS[parent], entries, context_type="corporate",
-                                     previously_alerted_titles=prior_titles)
+                                     previously_alerted_titles=prior_titles, ledger_titles=ledger_titles)
         verdicts, records = cross_model_disagreement_report(
-            parent, PARENT_GROUPS[parent], entries, "corporate", verdicts, previously_alerted_titles=prior_titles)
+            parent, PARENT_GROUPS[parent], entries, "corporate", verdicts,
+            previously_alerted_titles=prior_titles, ledger_titles=ledger_titles)
         disagreement_records.extend(records)
         strict_items, broad_extra_items = _log_split_and_record(
             verdicts, f"corp:{parent}", "corporate", parent, PARENT_GROUPS[parent])
@@ -2372,10 +2458,12 @@ def main():
         entries = new_local[location]
         print(f"  assessing local: {location} ({len(entries)} candidate(s))")
         prior_titles = _recent_alerted_context(seen, f"local:{location}")
+        ledger_titles = _ledger_recorded_context(ledger, "local", location)
         verdicts = assess_relevance(location, LOCATION_GROUPS[location], entries, context_type="local",
-                                     previously_alerted_titles=prior_titles)
+                                     previously_alerted_titles=prior_titles, ledger_titles=ledger_titles)
         verdicts, records = cross_model_disagreement_report(
-            location, LOCATION_GROUPS[location], entries, "local", verdicts, previously_alerted_titles=prior_titles)
+            location, LOCATION_GROUPS[location], entries, "local", verdicts,
+            previously_alerted_titles=prior_titles, ledger_titles=ledger_titles)
         disagreement_records.extend(records)
         strict_items, broad_extra_items = _log_split_and_record(
             verdicts, f"local:{location}", "local", location, LOCATION_GROUPS[location])
@@ -2392,10 +2480,12 @@ def main():
         # story that already went out in the main alert should score
         # primary_incremental=false, same as a rehash article would.
         prior_titles = _recent_alerted_context(seen, f"local:{location}")
+        ledger_titles = _ledger_recorded_context(ledger, "local", location)
         verdicts = assess_relevance(location, LOCATION_GROUPS[location], entries, context_type="local",
-                                     previously_alerted_titles=prior_titles)
+                                     previously_alerted_titles=prior_titles, ledger_titles=ledger_titles)
         verdicts, records = cross_model_disagreement_report(
-            location, LOCATION_GROUPS[location], entries, "local", verdicts, previously_alerted_titles=prior_titles)
+            location, LOCATION_GROUPS[location], entries, "local", verdicts,
+            previously_alerted_titles=prior_titles, ledger_titles=ledger_titles)
         disagreement_records.extend(records)
         # As of 2026-09-16, video is scored and routed exactly like an
         # article — a strict_relevant video is just as eligible for the

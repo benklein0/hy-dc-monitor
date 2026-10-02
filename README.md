@@ -113,15 +113,28 @@ Three layers of search, all feeding into a "Local / Site News" section:
    just diagnostic, it actively closes real coverage gaps.
 
    **Exception**: `RAW_LOCATION_SEARCH_EXCLUDE` skips this layer entirely
-   for large/generic metro locations (currently Austin, TX and Chicago,
-   IL) where a bare-name search returns enormous unrelated daily news
-   volume (Tesla launch events, obituaries, local sports, everything) —
-   exactly the flood the anchor-term gating on `fetch_local_news` exists
-   to prevent. A batch large enough can overwhelm a single Claude call
-   and previously triggered a fail-open that dumped dozens of irrelevant
-   articles straight into the main alert; see the batching and fail-open
-   fixes below for the general-purpose backstops, and this exclusion for
-   removing the risk at the source for known-bad locations.
+   for large/generic metro locations (currently Austin, TX; Chicago, IL;
+   and, added 2026-10-02, Atlanta, GA) where a bare-name search returns
+   enormous unrelated daily news volume (Tesla launch events, obituaries,
+   local sports, everything) — exactly the flood the anchor-term gating
+   on `fetch_local_news` exists to prevent. A batch large enough can
+   overwhelm a single Claude call and previously triggered a fail-open
+   that dumped dozens of irrelevant articles straight into the main
+   alert; see the batching and fail-open fixes below for the
+   general-purpose backstops, and this exclusion for removing the risk
+   at the source for known-bad locations. Atlanta was added after a
+   traffic audit found EDGCOM's Atlanta site running 13-58 "assessing
+   local" candidates per hourly run (one run needed to split into
+   multiple Claude calls just to fit) versus 1-4 for every other tracked
+   location — Zoo Atlanta pandas, Falcons tailgate menus, metro crime
+   blotter items, NWSL branding news, individual real-estate listings,
+   none of it related to the site. The gated `fetch_local_news` (anchor
+   terms + EDGCOM's tenants Alibaba/CoreWeave) and `fetch_site_specific_
+   news` still cover Atlanta; only the ungated recall-backstop layer is
+   skipped. If another tracked site ever moves into a similarly large
+   metro, check its "assessing local" candidate count against the rest
+   of the fleet the same way before assuming it needs the same fix —
+   this list is for confirmed outliers, not a default for every city.
 
 6. **State PUC/PSC docket filings** (`fetch_puc_dockets`, added
    2026-09-13) — a real interconnection/service-agreement filing at a
@@ -261,6 +274,26 @@ Three layers of search, all feeding into a "Local / Site News" section:
    - `primary_incremental` — is this original reporting of a new fact,
      not derivative commentary (stock technical-analysis, "why X stock
      moved today" pieces) or a rehash/recap of already-reported facts?
+
+   **Metro-wide general development/civic/real-estate news** (added
+   2026-10-02) — for a site in a large metro, being in the same city isn't
+   enough for `on_topic`. A traffic audit of EDGCOM's Atlanta site found
+   Claude marking a Beltline trail segment completion, a public-art
+   monument installation, and an unrelated $10M+ residential estate sale
+   as both on-topic and market-moving, reasoned through language like
+   "relevant to the site's competitive/collateral context" — vague enough
+   to justify almost any story set somewhere in the same large city. All
+   three were correctly caught by the cross-model veto below before
+   reaching the main alert, but that's a second line of defense catching
+   a first-line miss, not something to rely on alone. The prompt now
+   calls this out explicitly: for a large-metro site, `on_topic` requires
+   the article's actual subject to be the site, the tenant, or a body
+   with direct authority over the site's own permitting/utility/zoning
+   case — not a general-interest story that merely happens to occur in
+   the same metro, however finance-sounding the connecting language
+   reads ("context," "environment," "landscape," "signals activity"
+   without naming an actual mechanism is treated the same as a hedge word
+   under the existing confidence-check rule).
 
    **Confidence check on all three criteria** — Claude only sees a title
    and a short summary, not the full article, and real traffic showed it
@@ -567,6 +600,33 @@ current `credit_ledger.json` when you want it brought up to date.
   window was also widened from an original 10 days to 21, since HY
   credit story arcs (an IPO process, a financing round) often play out
   over multiple weeks with each new mention reworded.
+- **Ledger-backed long-horizon dedup** (`_ledger_recorded_context`, added
+  2026-10-02) — the 21-day window above only covers things that actually
+  reached the main alert, and both it and the URL/title dedup are backed
+  by `seen_articles.json`, which is pruned after `MAX_SEEN_AGE_DAYS` (14
+  days). That leaves a real gap: Google News occasionally re-crawls or
+  re-syndicates a page well after its true publish date, handing it a
+  fresh-looking feed timestamp — if the original coverage is more than
+  14-21 days old, nothing short enough remembers it, and it reads as
+  brand-new. Since the credit ledger (above) is never trimmed, every
+  on-topic/primary-incremental item ever recorded for a bond group
+  (`LEDGER_CONTEXT_LOOKBACK_DAYS`, 365 days) is now also passed to Claude
+  as a second, separately-labeled context block ("ALSO ON RECORD... not
+  necessarily sent to the main alert") alongside the main-alert one, with
+  instructions to mark a resurfacing of the same underlying fact as
+  stale even when the timestamp looks fresh. This is deliberately done as
+  LLM context rather than a hard pre-filter: silently dropping anything
+  that fuzzy-matches 365 days of ledger titles risked suppressing a
+  genuinely new, later development that happens to reuse similar wording
+  (a recurring permitting hearing, a multi-stage financing) — exactly the
+  failure mode the rest of this pipeline avoids by letting Claude judge
+  borderline cases instead of a blunt heuristic. There's a hard limit to
+  this fix, worth being honest about: an article that's old but has never
+  been seen by this monitor before (first appearance in the feed, despite
+  an old true publish date) won't match anything in the ledger either —
+  the only backstop for that case is the system prompt's existing STALE
+  PRIMARY COVERAGE rule, which depends on the article's own text giving a
+  date cue, and won't catch stale coverage that reads as generic/evergreen.
 - **3-day hard age cutoff** (`MAX_ARTICLE_AGE_DAYS`) — tightened from an
   earlier 14-day version after a Denton, TX article with an actual byline
   of Aug 21 surfaced in a Sept 3 run (13 days old — technically inside a
